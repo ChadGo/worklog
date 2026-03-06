@@ -13,54 +13,22 @@ end
 
 local function getLogPath()
     local date = os.date("%Y-%m-%d")
-    return getLogsDir() .. "/" .. date .. ".md"
-end
-
-local function ensureManualSection(path)
-    local f = io.open(path, "r")
-    if not f then
-        -- Create the file with both sections
-        local date = os.date("%Y-%m-%d")
-        f = io.open(path, "w")
-        if f then
-            f:write("# Activity Log - " .. date .. "\n\n")
-            f:write("## Tracked Activity\n\n")
-            f:write("## Manual Entries\n\n")
-            f:close()
-        end
-        return
-    end
-
-    local content = f:read("*a")
-    f:close()
-
-    if not content:find("## Manual Entries") then
-        f = io.open(path, "a")
-        if f then
-            f:write("\n## Manual Entries\n\n")
-            f:close()
-        end
-    end
+    return getLogsDir() .. "/" .. date .. ".jsonl"
 end
 
 local function appendManualEntry(text)
     if not text or text == "" then return end
 
     local path = getLogPath()
-    ensureManualSection(path)
+    local record = hs.json.encode({
+        time = os.date("%H:%M:%S"),
+        type = "manual",
+        text = text,
+    })
 
-    local timestamp = os.date("%H:%M:%S")
-    local entry = "- [" .. timestamp .. "] " .. text .. "\n"
-
-    local f = io.open(path, "r")
-    if not f then return end
-    local content = f:read("*a")
-    f:close()
-
-    -- Append after the Manual Entries header
-    f = io.open(path, "a")
+    local f = io.open(path, "a")
     if f then
-        f:write(entry)
+        f:write(record .. "\n")
         f:close()
     end
 end

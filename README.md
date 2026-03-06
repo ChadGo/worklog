@@ -115,7 +115,7 @@ activity-monitor/
 │   ├── activity_logger.lua     # Manual log entry webview dialog
 │   ├── activity_summary.lua    # Summary generation via Claude CLI
 │   └── config.lua              # All configurable settings
-├── logs/                       # Daily activity logs (YYYY-MM-DD.md)
+├── logs/                       # Daily activity logs (YYYY-MM-DD.jsonl)
 ├── summaries/                  # Daily summaries (YYYY-MM-DD.md)
 ├── instructions.md             # Custom instructions for summaries
 └── README.md
@@ -123,17 +123,12 @@ activity-monitor/
 
 ## Log Format
 
-Daily logs (`logs/YYYY-MM-DD.md`) look like:
+Daily logs are JSONL files (`logs/YYYY-MM-DD.jsonl`) with one JSON object per line:
 
-```markdown
-# Activity Log - 2026-03-06
-
-## Tracked Activity
-- [09:00:15] VS Code - activity-monitor/init.lua
-- [09:05:45] Chrome - GitHub Pull Request #123
-- [09:12:00] Terminal - zsh: npm test
-
-## Manual Entries
-- [10:30:00] Discussed API design with team in standup
-- [14:00:00] Whiteboard session on caching strategy
+```json
+{"time":"09:00:15","type":"track","app":"VS Code","title":"activity-monitor/init.lua"}
+{"time":"09:05:45","type":"track","app":"Chrome","title":"GitHub Pull Request #123"}
+{"time":"09:12:00","type":"track","app":"Terminal","title":"zsh: npm test"}
+{"time":"10:30:00","type":"manual","text":"Discussed API design with team in standup"}
+{"time":"14:00:00","type":"manual","text":"Whiteboard session on caching strategy"}
 ```

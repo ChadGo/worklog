@@ -17,7 +17,7 @@ end
 
 local function getLogPath(date)
     date = date or os.date("%Y-%m-%d")
-    return getLogsDir() .. "/" .. date .. ".md"
+    return getLogsDir() .. "/" .. date .. ".jsonl"
 end
 
 local function getSummaryPath(date)
@@ -61,12 +61,15 @@ function M.generate(date)
     local instructions = readFile(getInstructionsPath()) or ""
 
     local prompt = "You are summarizing a day's computer activity log into a concise markdown summary.\n\n"
+    prompt = prompt .. "The log is in JSONL format. Each line is a JSON object with these fields:\n"
+    prompt = prompt .. '- type "track": automatic window tracking with "time", "app", "title"\n'
+    prompt = prompt .. '- type "manual": user-written log entry with "time", "text"\n\n'
 
     if instructions ~= "" then
         prompt = prompt .. "## Custom Instructions\n\n" .. instructions .. "\n\n"
     end
 
-    prompt = prompt .. "## Activity Log\n\n" .. logContent .. "\n\n"
+    prompt = prompt .. "## Activity Log\n\n```\n" .. logContent .. "```\n\n"
     prompt = prompt .. "## Task\n\n"
     prompt = prompt .. "Write a concise markdown summary of what was worked on today. "
     prompt = prompt .. "Group related activities together. Include approximate time ranges. "
@@ -78,16 +81,15 @@ function M.generate(date)
         informativeText = "Generating summary for " .. date .. "..."
     }):send()
 
-    -- Find claude CLI
-    local claudePath = config.claude_path or "claude"
+    -- Write prompt to a temp file to avoid shell escaping issues
+    local tmpPath = os.tmpname()
+    writeFile(tmpPath, prompt)
 
-    -- Build the command: pipe prompt to claude CLI
-    local escapedPrompt = prompt:gsub("'", "'\\''")
+    local claudePath = config.claude_path or "claude"
     local summaryPath = getSummaryPath(date)
     local cmd = string.format(
-        "echo '%s' | '%s' --print 2>&1",
-        escapedPrompt,
-        claudePath
+        "cat '%s' | '%s' --print 2>&1; rm -f '%s'",
+        tmpPath, claudePath, tmpPath
     )
 
     -- Run async to avoid blocking Hammerspoon

@@ -2,11 +2,34 @@ local M = {}
 
 local config = nil
 local lastEntry = nil
+local lastEntryTime = 0
 local pollingTimer = nil
 local windowFilter = nil
 
+-- Minimum seconds between logging entries for the same app
+local MIN_INTERVAL_SAME_APP = 5
+
 function M.init(cfg)
     config = cfg
+end
+
+-- Normalize a window title by stripping noisy parts (spinners, dimensions, process info)
+local function normalizeTitle(title)
+    if not title then return "" end
+    -- Strip common terminal spinner characters
+    title = title:gsub("[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠂⠐✳◂▸]", "")
+    -- Strip terminal dimension patterns like "162x47" or "82x22"
+    title = title:gsub("%d+×%d+", "")
+    -- Strip process info patterns like "node ◂ claude" / "caffeinate ◂ claude"
+    title = title:gsub("caffeinate[^—]*", "")
+    title = title:gsub("node[^—]*", "")
+    -- Collapse multiple spaces/dashes
+    title = title:gsub("%s+", " ")
+    title = title:gsub("[—%-]%s*[—%-]", "—")
+    title = title:gsub("^%s+", ""):gsub("%s+$", "")
+    -- Strip trailing separators
+    title = title:gsub("[—%-]%s*$", "")
+    return title
 end
 
 local function getLogsDir()
@@ -15,60 +38,39 @@ end
 
 local function getLogPath()
     local date = os.date("%Y-%m-%d")
-    return getLogsDir() .. "/" .. date .. ".md"
-end
-
-local function ensureLogFile(path)
-    local f = io.open(path, "r")
-    if f then
-        f:close()
-        return
-    end
-    local date = os.date("%Y-%m-%d")
-    f = io.open(path, "w")
-    if f then
-        f:write("# Activity Log - " .. date .. "\n\n")
-        f:write("## Tracked Activity\n\n")
-        f:close()
-    end
+    return getLogsDir() .. "/" .. date .. ".jsonl"
 end
 
 local function logActivity(appName, windowTitle)
     if not appName or appName == "" then return end
 
-    local entry = appName .. " - " .. (windowTitle or "")
+    local normalized = normalizeTitle(windowTitle)
+    local entry = appName .. "|" .. normalized
+    local now = os.time()
+
+    -- Deduplicate: skip if same normalized entry
     if entry == lastEntry then return end
+
+    -- Throttle: if same app, require minimum interval
+    if lastEntry and lastEntry:sub(1, #appName + 1) == appName .. "|" and (now - lastEntryTime) < MIN_INTERVAL_SAME_APP then
+        return
+    end
+
     lastEntry = entry
+    lastEntryTime = now
 
     local path = getLogPath()
-    ensureLogFile(path)
+    local record = hs.json.encode({
+        time = os.date("%H:%M:%S"),
+        type = "track",
+        app = appName,
+        title = normalized,
+    })
 
-    local timestamp = os.date("%H:%M:%S")
-    local line = "- [" .. timestamp .. "] " .. entry .. "\n"
-
-    -- Read existing content to insert before Manual Entries if it exists
-    local f = io.open(path, "r")
-    if not f then return end
-    local content = f:read("*a")
-    f:close()
-
-    local manualPos = content:find("\n## Manual Entries\n")
-    if manualPos then
-        -- Insert before the Manual Entries section
-        local before = content:sub(1, manualPos - 1)
-        local after = content:sub(manualPos)
-        f = io.open(path, "w")
-        if f then
-            f:write(before .. line .. after)
-            f:close()
-        end
-    else
-        -- Append to end
-        f = io.open(path, "a")
-        if f then
-            f:write(line)
-            f:close()
-        end
+    local f = io.open(path, "a")
+    if f then
+        f:write(record .. "\n")
+        f:close()
     end
 end
 
