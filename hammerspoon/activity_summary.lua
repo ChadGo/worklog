@@ -7,14 +7,22 @@ function M.init(cfg)
     config = cfg
 end
 
+local function getLogsDir()
+    return config.logs_path or (config.base_path .. "/logs")
+end
+
+local function getSummariesDir()
+    return config.summaries_path or (config.base_path .. "/summaries")
+end
+
 local function getLogPath(date)
     date = date or os.date("%Y-%m-%d")
-    return config.base_path .. "/logs/" .. date .. ".md"
+    return getLogsDir() .. "/" .. date .. ".md"
 end
 
 local function getSummaryPath(date)
     date = date or os.date("%Y-%m-%d")
-    return config.base_path .. "/summaries/" .. date .. ".md"
+    return getSummariesDir() .. "/" .. date .. ".md"
 end
 
 local function getInstructionsPath()

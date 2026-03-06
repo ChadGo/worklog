@@ -7,9 +7,13 @@ function M.init(cfg)
     config = cfg
 end
 
+local function getLogsDir()
+    return config.logs_path or (config.base_path .. "/logs")
+end
+
 local function getLogPath()
     local date = os.date("%Y-%m-%d")
-    return config.base_path .. "/logs/" .. date .. ".md"
+    return getLogsDir() .. "/" .. date .. ".md"
 end
 
 local function ensureManualSection(path)
