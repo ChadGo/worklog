@@ -126,9 +126,11 @@ activity-monitor/
 Daily logs are JSONL files (`logs/YYYY-MM-DD.jsonl`) with one JSON object per line:
 
 ```json
-{"time":"09:00:15","type":"track","app":"VS Code","title":"activity-monitor/init.lua"}
-{"time":"09:05:45","type":"track","app":"Chrome","title":"GitHub Pull Request #123"}
-{"time":"09:12:00","type":"track","app":"Terminal","title":"zsh: npm test"}
+{"time":"09:00:15","type":"track","app":"VS Code","bundle_id":"com.microsoft.VSCode","title":"activity-monitor/init.lua","cwd":"~/Projects/activity-monitor"}
+{"time":"09:05:45","type":"track","app":"Google Chrome","bundle_id":"com.google.Chrome","title":"GitHub Pull Request #123"}
+{"time":"09:12:00","type":"track","app":"Terminal","bundle_id":"com.apple.Terminal","title":"zsh: npm test","cwd":"~/Projects/activity-monitor"}
 {"time":"10:30:00","type":"manual","text":"Discussed API design with team in standup"}
+{"time":"12:30:00","type":"idle_start","idle_seconds":300}
+{"time":"12:45:00","type":"idle_end"}
 {"time":"14:00:00","type":"manual","text":"Whiteboard session on caching strategy"}
 ```

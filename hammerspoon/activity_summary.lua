@@ -62,8 +62,11 @@ function M.generate(date)
 
     local prompt = "You are summarizing a day's computer activity log into a concise markdown summary.\n\n"
     prompt = prompt .. "The log is in JSONL format. Each line is a JSON object with these fields:\n"
-    prompt = prompt .. '- type "track": automatic window tracking with "time", "app", "title"\n'
-    prompt = prompt .. '- type "manual": user-written log entry with "time", "text"\n\n'
+    prompt = prompt .. '- type "track": automatic window tracking with "time", "app", "bundle_id", "title", and optionally "cwd" (working directory)\n'
+    prompt = prompt .. '- type "manual": user-written log entry with "time", "text"\n'
+    prompt = prompt .. '- type "idle_start": user went idle, with "idle_seconds"\n'
+    prompt = prompt .. '- type "idle_end": user returned from idle\n'
+    prompt = prompt .. 'The "cwd" field indicates which project directory the user was working in. Use this to group activities by project.\n\n'
 
     if instructions ~= "" then
         prompt = prompt .. "## Custom Instructions\n\n" .. instructions .. "\n\n"
