@@ -44,29 +44,68 @@ local function getLogPath()
     return getLogsDir() .. "/" .. date .. ".jsonl"
 end
 
--- Get the deepest child process's working directory for a PID.
--- For terminals, this finds the shell (or command running in it) rather than the terminal app itself.
-local function getWorkingDirectory(pid)
+-- Get all descendant PIDs of a process recursively
+local function getDescendantPids(pid)
+    if not pid then return {} end
+    local output, status = hs.execute(string.format("pgrep -P %d 2>/dev/null", pid))
+    if not status or not output or output == "" then return {} end
+
+    local pids = {}
+    for p in output:gmatch("%d+") do
+        local childPid = tonumber(p)
+        table.insert(pids, childPid)
+        -- Recurse into children
+        for _, gp in ipairs(getDescendantPids(childPid)) do
+            table.insert(pids, gp)
+        end
+    end
+    return pids
+end
+
+-- Get working directory by checking all descendant processes.
+-- For terminals with multiple tabs, uses the window title to match the right shell.
+local function getWorkingDirectory(pid, windowTitle)
     if not pid then return nil end
 
-    -- Find the deepest child process (e.g., terminal -> shell -> running command)
-    local deepestPid = pid
-    local visited = {}
-    while true do
-        if visited[deepestPid] then break end
-        visited[deepestPid] = true
-        local childOutput, childStatus = hs.execute(string.format("pgrep -P %d 2>/dev/null | head -1", deepestPid))
-        if childStatus and childOutput and childOutput:match("%d+") then
-            deepestPid = tonumber(childOutput:match("%d+"))
-        else
-            break
+    local descendants = getDescendantPids(pid)
+    if #descendants == 0 then
+        -- No children, try the process itself
+        local output, status = hs.execute(string.format("lsof -a -d cwd -p %d -Fn 2>/dev/null | grep ^n | head -1 | cut -c2-", pid))
+        if status and output and output ~= "" then
+            local cwd = output:gsub("%s+$", "")
+            if cwd ~= "/" then return cwd end
+        end
+        return nil
+    end
+
+    -- Collect unique cwds from all descendants
+    local pidList = table.concat(descendants, ",")
+    local output, status = hs.execute(string.format("lsof -a -d cwd -p %s -Fn 2>/dev/null | grep ^n | cut -c2-", pidList))
+    if not status or not output or output == "" then return nil end
+
+    local cwds = {}
+    for dir in output:gmatch("[^\n]+") do
+        dir = dir:gsub("%s+$", "")
+        if dir ~= "/" and dir ~= "" then
+            cwds[dir] = true
         end
     end
 
-    local output, status = hs.execute(string.format("lsof -d cwd -p %d -Fn 2>/dev/null | grep ^n | head -1 | cut -c2-", deepestPid))
-    if status and output and output ~= "" then
-        return output:gsub("%s+$", "")
+    -- If window title contains a directory name hint, try to match
+    if windowTitle then
+        for dir, _ in pairs(cwds) do
+            local dirName = dir:match("([^/]+)$")
+            if dirName and windowTitle:find(dirName, 1, true) then
+                return dir
+            end
+        end
     end
+
+    -- Fall back to the first non-root cwd found
+    for dir, _ in pairs(cwds) do
+        return dir
+    end
+
     return nil
 end
 
@@ -149,8 +188,8 @@ local function logActivity(appName, bundleID, windowTitle, pid)
         title = normalized,
     }
 
-    -- Get working directory from the deepest child process
-    local cwd = getWorkingDirectory(pid)
+    -- Get working directory from descendant processes
+    local cwd = getWorkingDirectory(pid, windowTitle)
     if cwd and cwd ~= "/" then
         local home = os.getenv("HOME")
 
