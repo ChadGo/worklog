@@ -1,0 +1,5 @@
+- Ignore Netflix, YouTube, and Spotify activity — this is background music/entertainment
+- Group related activities together (e.g., all work on the same project)
+- Highlight context switches between different projects
+- Note time spent in meetings or communication tools (Slack, Zoom, Teams, etc.)
+- Keep the summary concise but capture all meaningful work
