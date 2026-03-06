@@ -44,14 +44,49 @@ local function getLogPath()
     return getLogsDir() .. "/" .. date .. ".jsonl"
 end
 
--- Get working directory for a given PID via lsof
+-- Get the deepest child process's working directory for a PID.
+-- For terminals, this finds the shell (or command running in it) rather than the terminal app itself.
 local function getWorkingDirectory(pid)
     if not pid then return nil end
-    local output, status = hs.execute(string.format("lsof -d cwd -p %d -Fn 2>/dev/null | grep ^n | head -1 | cut -c2-", pid))
+
+    -- Find the deepest child process (e.g., terminal -> shell -> running command)
+    local deepestPid = pid
+    local visited = {}
+    while true do
+        if visited[deepestPid] then break end
+        visited[deepestPid] = true
+        local childOutput, childStatus = hs.execute(string.format("pgrep -P %d 2>/dev/null | head -1", deepestPid))
+        if childStatus and childOutput and childOutput:match("%d+") then
+            deepestPid = tonumber(childOutput:match("%d+"))
+        else
+            break
+        end
+    end
+
+    local output, status = hs.execute(string.format("lsof -d cwd -p %d -Fn 2>/dev/null | grep ^n | head -1 | cut -c2-", deepestPid))
     if status and output and output ~= "" then
         return output:gsub("%s+$", "")
     end
     return nil
+end
+
+-- Find the git repo root and current branch for a directory
+local function getGitInfo(dir)
+    if not dir then return nil, nil end
+    -- Expand ~ for shell commands
+    local expanded = dir:gsub("^~", os.getenv("HOME") or "~")
+    local root, rootStatus = hs.execute(string.format("git -C '%s' rev-parse --show-toplevel 2>/dev/null", expanded))
+    if not rootStatus or not root or root == "" then return nil, nil end
+    root = root:gsub("%s+$", "")
+
+    local branch, branchStatus = hs.execute(string.format("git -C '%s' rev-parse --abbrev-ref HEAD 2>/dev/null", expanded))
+    if branchStatus and branch and branch ~= "" then
+        branch = branch:gsub("%s+$", "")
+    else
+        branch = nil
+    end
+
+    return root, branch
 end
 
 local function appendLog(record)
@@ -114,11 +149,23 @@ local function logActivity(appName, bundleID, windowTitle, pid)
         title = normalized,
     }
 
-    -- Get working directory for terminals and editors
+    -- Get working directory from the deepest child process
     local cwd = getWorkingDirectory(pid)
     if cwd and cwd ~= "/" then
-        -- Shorten home directory prefix
         local home = os.getenv("HOME")
+
+        -- Check for git repo before shortening
+        local gitRoot, gitBranch = getGitInfo(cwd)
+        if gitRoot then
+            -- Shorten git root path
+            if home and gitRoot:sub(1, #home) == home then
+                gitRoot = "~" .. gitRoot:sub(#home + 1)
+            end
+            record.git_repo = gitRoot
+            record.git_branch = gitBranch
+        end
+
+        -- Shorten cwd
         if home and cwd:sub(1, #home) == home then
             cwd = "~" .. cwd:sub(#home + 1)
         end
