@@ -69,10 +69,8 @@ local function buildMenu()
             end
         },
         {
-            title = "📂 Open Summaries",
-            fn = function()
-                hs.execute("open '" .. config.base_path .. "/summaries'")
-            end
+            title = "📂 Browse Summaries",
+            fn = function() summary.showBrowser() end
         },
         {
             title = "📂 Open Logs",
