@@ -37,40 +37,87 @@ local function readFile(path)
     return content
 end
 
--- Extract unique git repos from the JSONL log and fetch commits for the given date
-local function getGitCommits(logContent, date)
-    if not logContent or logContent == "" then return "" end
+-- Parse unique git repos from the JSONL log, returning {display_path, expanded_path} pairs
+local function parseRepos(logContent)
+    if not logContent or logContent == "" then return {} end
 
-    -- Parse unique git repos from log entries
     local repos = {}
     local seen = {}
+    local home = os.getenv("HOME") or ""
     for line in logContent:gmatch("[^\n]+") do
         local repo = line:match('"git_repo":"([^"]+)"')
         if repo and not seen[repo] then
             seen[repo] = true
-            table.insert(repos, repo)
+            local expanded = repo:gsub("\\/", "/")
+            expanded = expanded:gsub("^~", home)
+            table.insert(repos, {display = repo:gsub("\\/", "/"), path = expanded})
         end
     end
+    return repos
+end
 
+-- Fetch git commits for the given date from each repo
+local function getGitCommits(repos, date)
     if #repos == 0 then return "" end
 
-    local home = os.getenv("HOME") or ""
     local result = ""
-
     for _, repo in ipairs(repos) do
-        -- Remove JSON-escaped backslashes and expand ~ to home directory
-        local expanded = repo:gsub("\\/", "/")
-        expanded = expanded:gsub("^~", home)
         local cmd = string.format(
             "git -C '%s' log --all --since='%s 00:00:00' --until='%s 23:59:59' --format='%%h %%s' 2>/dev/null",
-            expanded, date, date
+            repo.path, date, date
         )
         local output, status = hs.execute(cmd)
         if status and output and output ~= "" then
-            local repoName = repo:match("([^/]+)$") or repo
-            result = result .. "### " .. repoName .. " (" .. repo .. ")\n"
+            local repoName = repo.display:match("([^/]+)$") or repo.display
+            result = result .. "### " .. repoName .. " (" .. repo.display .. ")\n"
             result = result .. output .. "\n"
         end
+    end
+    return result
+end
+
+-- Fetch GitHub PR activity for the given date from each repo that has a GitHub remote
+local function getPRActivity(repos, date)
+    if #repos == 0 then return "" end
+
+    local ghPath = config.gh_path or "gh"
+    local result = ""
+
+    for _, repo in ipairs(repos) do
+        -- Check if repo has a GitHub remote
+        local remote, remoteOk = hs.execute(string.format(
+            "git -C '%s' remote get-url origin 2>/dev/null", repo.path
+        ))
+        if not remoteOk or not remote or not remote:match("github") then
+            goto continue
+        end
+
+        local repoName = repo.display:match("([^/]+)$") or repo.display
+        local section = ""
+
+        -- PRs authored, updated today
+        local authored, authOk = hs.execute(string.format(
+            "%s pr list --repo '%s' --author @me --search 'updated:>=%s' --json number,title,state,url,updatedAt --limit 50 2>/dev/null",
+            ghPath, repo.path, date
+        ))
+        if authOk and authored and authored ~= "" and authored ~= "[]\n" and authored ~= "[]" then
+            section = section .. "**Authored:**\n" .. authored .. "\n"
+        end
+
+        -- PRs where I was requested as reviewer, updated today
+        local reviewed, revOk = hs.execute(string.format(
+            "%s pr list --repo '%s' --search 'reviewed-by:@me updated:>=%s' --json number,title,state,url,updatedAt --limit 50 2>/dev/null",
+            ghPath, repo.path, date
+        ))
+        if revOk and reviewed and reviewed ~= "" and reviewed ~= "[]\n" and reviewed ~= "[]" then
+            section = section .. "**Reviewed:**\n" .. reviewed .. "\n"
+        end
+
+        if section ~= "" then
+            result = result .. "### " .. repoName .. " (" .. repo.display .. ")\n" .. section
+        end
+
+        ::continue::
     end
 
     return result
@@ -113,11 +160,21 @@ function M.generate(date)
 
     prompt = prompt .. "## Activity Log\n\n```\n" .. logContent .. "```\n\n"
 
-    local gitCommits = getGitCommits(logContent, date)
+    local repos = parseRepos(logContent)
+
+    local gitCommits = getGitCommits(repos, date)
     if gitCommits ~= "" then
         prompt = prompt .. "## Git Commits Made Today\n\n" .. gitCommits .. "\n"
         prompt = prompt .. "Use these commits to understand what was actually accomplished in each project. "
         prompt = prompt .. "The commit messages provide concrete details about the work done.\n\n"
+    end
+
+    local prActivity = getPRActivity(repos, date)
+    if prActivity ~= "" then
+        prompt = prompt .. "## GitHub PR Activity Today\n\n" .. prActivity .. "\n"
+        prompt = prompt .. "Include PR activity in the summary — PRs opened, updated, reviewed, or merged.\n\n"
+    else
+        prompt = prompt .. "## GitHub PR Activity Today\n\nNo PR activity found.\n\n"
     end
 
     prompt = prompt .. "## Task\n\n"
