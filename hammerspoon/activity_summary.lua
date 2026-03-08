@@ -37,6 +37,44 @@ local function readFile(path)
     return content
 end
 
+-- Extract unique git repos from the JSONL log and fetch commits for the given date
+local function getGitCommits(logContent, date)
+    if not logContent or logContent == "" then return "" end
+
+    -- Parse unique git repos from log entries
+    local repos = {}
+    local seen = {}
+    for line in logContent:gmatch("[^\n]+") do
+        local repo = line:match('"git_repo":"([^"]+)"')
+        if repo and not seen[repo] then
+            seen[repo] = true
+            table.insert(repos, repo)
+        end
+    end
+
+    if #repos == 0 then return "" end
+
+    local home = os.getenv("HOME") or ""
+    local result = ""
+
+    for _, repo in ipairs(repos) do
+        -- Expand ~ to home directory
+        local expanded = repo:gsub("^~", home)
+        local cmd = string.format(
+            "git -C '%s' log --all --since='%s 00:00:00' --until='%s 23:59:59' --format='%%h %%s' 2>/dev/null",
+            expanded, date, date
+        )
+        local output, status = hs.execute(cmd)
+        if status and output and output ~= "" then
+            local repoName = repo:match("([^/]+)$") or repo
+            result = result .. "### " .. repoName .. " (" .. repo .. ")\n"
+            result = result .. output .. "\n"
+        end
+    end
+
+    return result
+end
+
 local function writeFile(path, content)
     local f = io.open(path, "w")
     if not f then return false end
@@ -73,9 +111,18 @@ function M.generate(date)
     end
 
     prompt = prompt .. "## Activity Log\n\n```\n" .. logContent .. "```\n\n"
+
+    local gitCommits = getGitCommits(logContent, date)
+    if gitCommits ~= "" then
+        prompt = prompt .. "## Git Commits Made Today\n\n" .. gitCommits .. "\n"
+        prompt = prompt .. "Use these commits to understand what was actually accomplished in each project. "
+        prompt = prompt .. "The commit messages provide concrete details about the work done.\n\n"
+    end
+
     prompt = prompt .. "## Task\n\n"
     prompt = prompt .. "Write a concise markdown summary of what was worked on today. "
     prompt = prompt .. "Group related activities together. Include approximate time ranges. "
+    prompt = prompt .. "Reference specific git commits where relevant to show what was accomplished. "
     prompt = prompt .. "Use headers and bullet points. Start the document with `# Summary - " .. date .. "`. "
     prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
 
