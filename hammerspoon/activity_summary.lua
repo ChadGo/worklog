@@ -58,8 +58,9 @@ local function getGitCommits(logContent, date)
     local result = ""
 
     for _, repo in ipairs(repos) do
-        -- Expand ~ to home directory
-        local expanded = repo:gsub("^~", home)
+        -- Remove JSON-escaped backslashes and expand ~ to home directory
+        local expanded = repo:gsub("\\/", "/")
+        expanded = expanded:gsub("^~", home)
         local cmd = string.format(
             "git -C '%s' log --all --since='%s 00:00:00' --until='%s 23:59:59' --format='%%h %%s' 2>/dev/null",
             expanded, date, date
@@ -90,7 +91,7 @@ function M.generate(date)
 
     if not logContent or logContent == "" then
         hs.notify.new({
-            title = "Activity Monitor",
+            title = "Worklog",
             informativeText = "No activity log found for " .. date
         }):send()
         return
@@ -122,12 +123,13 @@ function M.generate(date)
     prompt = prompt .. "## Task\n\n"
     prompt = prompt .. "Write a concise markdown summary of what was worked on today. "
     prompt = prompt .. "Group related activities together. Include approximate time ranges. "
-    prompt = prompt .. "Reference specific git commits where relevant to show what was accomplished. "
+    prompt = prompt .. "Include a '## Commits' section that lists all git commits grouped by project. "
+    prompt = prompt .. "For each commit, show the short hash and message. If a commit message is long, summarize it briefly. "
     prompt = prompt .. "Use headers and bullet points. Start the document with `# Summary - " .. date .. "`. "
     prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
 
     hs.notify.new({
-        title = "Activity Monitor",
+        title = "Worklog",
         informativeText = "Generating summary for " .. date .. "..."
     }):send()
 
@@ -147,7 +149,7 @@ function M.generate(date)
         if exitCode == 0 and stdOut and stdOut ~= "" then
             writeFile(summaryPath, stdOut)
             hs.notify.new({
-                title = "Activity Monitor",
+                title = "Worklog",
                 informativeText = "Summary saved for " .. date,
                 actionButtonTitle = "Open",
                 hasActionButton = true,
@@ -155,7 +157,7 @@ function M.generate(date)
         else
             local errMsg = stdErr or stdOut or "Unknown error"
             hs.notify.new({
-                title = "Activity Monitor",
+                title = "Worklog",
                 informativeText = "Summary generation failed: " .. errMsg:sub(1, 100)
             }):send()
         end

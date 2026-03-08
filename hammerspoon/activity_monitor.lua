@@ -1,7 +1,7 @@
--- Activity Monitor for Hammerspoon
+-- Worklog for Hammerspoon
 -- Tracks application usage and generates daily summaries
 
-local basePath = os.getenv("HOME") .. "/Projects/activity-monitor"
+local basePath = os.getenv("HOME") .. "/Projects/worklog"
 local config = dofile(basePath .. "/hammerspoon/config.lua")
 
 local tracker = dofile(basePath .. "/hammerspoon/activity_tracker.lua")
@@ -99,6 +99,6 @@ tracker.start()
 summary.startAutoSummary()
 
 hs.notify.new({
-    title = "Activity Monitor",
+    title = "Worklog",
     informativeText = "Tracking started"
 }):send()

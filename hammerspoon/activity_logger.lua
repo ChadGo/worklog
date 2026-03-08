@@ -145,7 +145,7 @@ function M.show()
         if type(body) == "string" and body:sub(1, 7) == "submit:" then
             local text = body:sub(8)
             appendManualEntry(text)
-            hs.notify.new({title = "Activity Monitor", informativeText = "Log entry saved"}):send()
+            hs.notify.new({title = "Worklog", informativeText = "Log entry saved"}):send()
             if webview then
                 webview:delete()
                 webview = nil
@@ -166,7 +166,7 @@ function M.show()
         hs.webview.windowMasks.nonactivating
     )
 
-    webview:windowTitle("Activity Monitor - Log Entry")
+    webview:windowTitle("Worklog - Log Entry")
     webview:allowTextEntry(true)
     webview:level(hs.drawing.windowLevels.floating)
     webview:darkMode(true)
