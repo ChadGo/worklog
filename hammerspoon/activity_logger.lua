@@ -139,30 +139,8 @@ function M.show()
         height
     )
 
-    webview = hs.webview.new(rect, {
-        developerExtrasEnabled = false,
-    })
-
-    webview:windowStyle(
-        hs.webview.windowMasks.titled |
-        hs.webview.windowMasks.closable |
-        hs.webview.windowMasks.nonactivating
-    )
-
-    webview:windowTitle("Activity Monitor - Log Entry")
-    webview:allowTextEntry(true)
-    webview:level(hs.drawing.windowLevels.floating)
-    webview:darkMode(true)
-
-    local uc = webview:asHSDrawing()
-
-    webview:navigationCallback(function(action, wv, navID, error)
-        if action == "didFinish" then
-            wv:evaluateJavaScript('document.getElementById("entry").focus()')
-        end
-    end)
-
-    webview:userContentController():setCallback(function(msg)
+    local uc = hs.webview.usercontent.new("hammerspoon")
+    uc:setCallback(function(msg)
         local body = msg.body
         if type(body) == "string" and body:sub(1, 7) == "submit:" then
             local text = body:sub(8)
@@ -180,9 +158,28 @@ function M.show()
         end
     end)
 
+    webview = hs.webview.new(rect, {developerExtrasEnabled = false}, uc)
+
+    webview:windowStyle(
+        hs.webview.windowMasks.titled |
+        hs.webview.windowMasks.closable |
+        hs.webview.windowMasks.nonactivating
+    )
+
+    webview:windowTitle("Activity Monitor - Log Entry")
+    webview:allowTextEntry(true)
+    webview:level(hs.drawing.windowLevels.floating)
+    webview:darkMode(true)
+
+    webview:navigationCallback(function(action, wv, navID, error)
+        if action == "didFinish" then
+            wv:evaluateJavaScript('document.getElementById("entry").focus()')
+        end
+    end)
+
     webview:html(getHTML())
     webview:show()
-    webview:hswindow():focus()
+    webview:bringToFront(true)
 end
 
 return M
