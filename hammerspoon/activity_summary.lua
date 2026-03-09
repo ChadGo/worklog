@@ -22,7 +22,7 @@ end
 
 local function getSummaryPath(date)
     date = date or os.date("%Y-%m-%d")
-    return getSummariesDir() .. "/" .. date .. ".md"
+    return getSummariesDir() .. "/daily/" .. date .. ".md"
 end
 
 local function getInstructionsPath()
@@ -131,6 +131,104 @@ local function writeFile(path, content)
     return true
 end
 
+-- Ensure a directory exists, creating it if needed
+local function ensureDir(dir)
+    hs.execute(string.format("mkdir -p '%s'", dir))
+end
+
+-- Run a prompt through Claude CLI async, writing result to outputPath
+local function runClaude(prompt, outputPath, label)
+    hs.notify.new({
+        title = "Worklog",
+        informativeText = "Generating " .. label .. "..."
+    }):send()
+
+    local tmpPath = os.tmpname()
+    writeFile(tmpPath, prompt)
+
+    local claudePath = config.claude_path or "claude"
+    local cmd = string.format(
+        "cat '%s' | '%s' --print 2>&1; rm -f '%s'",
+        tmpPath, claudePath, tmpPath
+    )
+
+    hs.task.new("/bin/zsh", function(exitCode, stdOut, stdErr)
+        if exitCode == 0 and stdOut and stdOut ~= "" then
+            ensureDir(outputPath:match("(.+)/"))
+            writeFile(outputPath, stdOut)
+            hs.notify.new({
+                title = "Worklog",
+                informativeText = label .. " saved",
+                actionButtonTitle = "Open",
+                hasActionButton = true,
+            }):send()
+        else
+            local errMsg = stdErr or stdOut or "Unknown error"
+            hs.notify.new({
+                title = "Worklog",
+                informativeText = label .. " failed: " .. errMsg:sub(1, 100)
+            }):send()
+        end
+    end, {"-c", cmd}):start()
+end
+
+-- Collect daily summary contents for a list of date strings
+local function collectDailySummaries(dates)
+    local summariesDir = getSummariesDir()
+    local collected = ""
+    for _, date in ipairs(dates) do
+        local path = summariesDir .. "/daily/" .. date .. ".md"
+        local content = readFile(path)
+        if content and content ~= "" then
+            collected = collected .. content .. "\n\n---\n\n"
+        end
+    end
+    return collected
+end
+
+-- Get all dates in a given ISO week (Mon-Sun) for a reference date
+local function getWeekDates(date)
+    -- Parse the date
+    local y, m, d = date:match("(%d+)-(%d+)-(%d+)")
+    local t = os.time({year = tonumber(y), month = tonumber(m), day = tonumber(d)})
+    -- os.date wday: 1=Sun, 2=Mon, ..., 7=Sat
+    local wday = tonumber(os.date("%w", t)) -- 0=Sun, 1=Mon, ..., 6=Sat
+    -- Find Monday of this week
+    local mondayOffset = wday == 0 and -6 or (1 - wday)
+    local monday = t + mondayOffset * 86400
+
+    local dates = {}
+    for i = 0, 6 do
+        table.insert(dates, os.date("%Y-%m-%d", monday + i * 86400))
+    end
+    local friday = os.date("%Y-%m-%d", monday + 4 * 86400)
+    return dates, friday  -- returns dates and Friday date as the week label
+end
+
+-- Get all dates in a given month
+local function getMonthDates(yearMonth)
+    local y, m = yearMonth:match("(%d+)-(%d+)")
+    y, m = tonumber(y), tonumber(m)
+    local dates = {}
+    for day = 1, 31 do
+        local t = os.time({year = y, month = m, day = day})
+        -- Verify we haven't rolled into the next month
+        if tonumber(os.date("%m", t)) == m then
+            table.insert(dates, os.date("%Y-%m-%d", t))
+        end
+    end
+    return dates
+end
+
+-- Get all months in a given year
+local function getYearMonths(year)
+    local months = {}
+    for m = 1, 12 do
+        table.insert(months, string.format("%s-%02d", year, m))
+    end
+    return months
+end
+
 function M.generate(date)
     date = date or os.date("%Y-%m-%d")
     local logPath = getLogPath(date)
@@ -187,40 +285,205 @@ function M.generate(date)
     prompt = prompt .. "Focus on the big picture — e.g. 'Spent most of the day in meetings, with the rest focused on X' or 'Deep work day primarily on X and Y'. "
     prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
 
+    runClaude(prompt, getSummaryPath(date), "Summary for " .. date)
+end
+
+function M.generateWeekly(date)
+    date = date or os.date("%Y-%m-%d")
+    local dates, weekLabel = getWeekDates(date)
+    local content = collectDailySummaries(dates)
+
+    if content == "" then
+        hs.notify.new({title = "Worklog", informativeText = "No daily summaries found for week of " .. weekLabel}):send()
+        return
+    end
+
+    local instructions = readFile(getInstructionsPath()) or ""
+    local prompt = "You are generating a weekly summary from daily work summaries.\n\n"
+    if instructions ~= "" then
+        prompt = prompt .. "## Custom Instructions\n\n" .. instructions .. "\n\n"
+    end
+    prompt = prompt .. "## Daily Summaries\n\n" .. content .. "\n"
+    prompt = prompt .. "## Task\n\n"
+    prompt = prompt .. "Write a concise weekly summary covering " .. dates[1] .. " through " .. dates[5] .. " (Mon-Fri). "
+    prompt = prompt .. "Start with `# Weekly Summary - " .. dates[1] .. " to " .. dates[5] .. "`. "
+    prompt = prompt .. "Immediately after the title, include a '## TLDR' with 3-4 sentences on the week's highlights. "
+    prompt = prompt .. "Then group by project or theme. Highlight key accomplishments, PRs merged, and patterns (e.g. heavy meeting days vs deep work days). "
+    prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
+
+    local outputPath = getSummariesDir() .. "/weekly/" .. weekLabel .. ".md"
+    runClaude(prompt, outputPath, "Weekly summary " .. weekLabel)
+end
+
+function M.generateMonthly(yearMonth)
+    yearMonth = yearMonth or os.date("%Y-%m")
+    local dates = getMonthDates(yearMonth)
+    local content = collectDailySummaries(dates)
+
+    if content == "" then
+        hs.notify.new({title = "Worklog", informativeText = "No daily summaries found for " .. yearMonth}):send()
+        return
+    end
+
+    local instructions = readFile(getInstructionsPath()) or ""
+    local prompt = "You are generating a monthly summary from daily work summaries.\n\n"
+    if instructions ~= "" then
+        prompt = prompt .. "## Custom Instructions\n\n" .. instructions .. "\n\n"
+    end
+    prompt = prompt .. "## Daily Summaries\n\n" .. content .. "\n"
+    prompt = prompt .. "## Task\n\n"
+    prompt = prompt .. "Write a concise monthly summary for " .. yearMonth .. ". "
+    prompt = prompt .. "Start with `# Monthly Summary - " .. yearMonth .. "`. "
+    prompt = prompt .. "Immediately after the title, include a '## TLDR' with 4-5 sentences on the month's highlights. "
+    prompt = prompt .. "Then organize by project or major theme. Highlight key accomplishments, milestones, and how time was distributed. "
+    prompt = prompt .. "Note trends — what took the most time, what was recurring, any shifts in focus. "
+    prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
+
+    local outputPath = getSummariesDir() .. "/monthly/" .. yearMonth .. ".md"
+    runClaude(prompt, outputPath, "Monthly summary " .. yearMonth)
+end
+
+function M.generateYearly(year)
+    year = year or os.date("%Y")
+    local months = getYearMonths(year)
+    local summariesDir = getSummariesDir()
+    local content = ""
+
+    for _, ym in ipairs(months) do
+        local path = summariesDir .. "/monthly/" .. ym .. ".md"
+        local c = readFile(path)
+        if c and c ~= "" then
+            content = content .. c .. "\n\n---\n\n"
+        end
+    end
+
+    -- Fall back to daily summaries if no monthly summaries exist
+    if content == "" then
+        for _, ym in ipairs(months) do
+            local dates = getMonthDates(ym)
+            content = content .. collectDailySummaries(dates)
+        end
+    end
+
+    if content == "" then
+        hs.notify.new({title = "Worklog", informativeText = "No summaries found for " .. year}):send()
+        return
+    end
+
+    local instructions = readFile(getInstructionsPath()) or ""
+    local prompt = "You are generating a yearly summary from monthly (or daily) work summaries.\n\n"
+    if instructions ~= "" then
+        prompt = prompt .. "## Custom Instructions\n\n" .. instructions .. "\n\n"
+    end
+    prompt = prompt .. "## Summaries\n\n" .. content .. "\n"
+    prompt = prompt .. "## Task\n\n"
+    prompt = prompt .. "Write a yearly summary for " .. year .. ". "
+    prompt = prompt .. "Start with `# Yearly Summary - " .. year .. "`. "
+    prompt = prompt .. "Immediately after the title, include a '## TLDR' with 5-6 sentences on the year's highlights. "
+    prompt = prompt .. "Organize by quarter or major theme. Highlight key projects, accomplishments, and how focus shifted over the year. "
+    prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
+
+    local outputPath = summariesDir .. "/yearly/" .. year .. ".md"
+    runClaude(prompt, outputPath, "Yearly summary " .. year)
+end
+
+-- Scan logs dir for all dates that have log files
+local function getAllLogDates()
+    local logsDir = getLogsDir()
+    local output, status = hs.execute(string.format("ls -1 '%s'/*.jsonl 2>/dev/null", logsDir))
+    local dates = {}
+    if status and output and output ~= "" then
+        for path in output:gmatch("[^\n]+") do
+            local date = path:match("(%d%d%d%d%-%d%d%-%d%d)%.jsonl$")
+            if date then table.insert(dates, date) end
+        end
+    end
+    table.sort(dates)
+    return dates
+end
+
+-- Run a list of {fn, args} tasks staggered by delay seconds
+local function runStaggered(tasks, delay)
+    for i, task in ipairs(tasks) do
+        hs.timer.doAfter((i - 1) * delay, function()
+            task.fn(task.arg)
+        end)
+    end
+    local total = #tasks
     hs.notify.new({
         title = "Worklog",
-        informativeText = "Generating summary for " .. date .. "..."
+        informativeText = string.format("Queued %d summary generation(s), ~%ds apart", total, delay)
     }):send()
+end
 
-    -- Write prompt to a temp file to avoid shell escaping issues
-    local tmpPath = os.tmpname()
-    writeFile(tmpPath, prompt)
+function M.regenerateAllDaily()
+    local dates = getAllLogDates()
+    if #dates == 0 then
+        hs.notify.new({title = "Worklog", informativeText = "No log files found"}):send()
+        return
+    end
+    local tasks = {}
+    for _, date in ipairs(dates) do
+        table.insert(tasks, {fn = M.generate, arg = date})
+    end
+    runStaggered(tasks, 30)
+end
 
-    local claudePath = config.claude_path or "claude"
-    local summaryPath = getSummaryPath(date)
-    local cmd = string.format(
-        "cat '%s' | '%s' --print 2>&1; rm -f '%s'",
-        tmpPath, claudePath, tmpPath
-    )
-
-    -- Run async to avoid blocking Hammerspoon
-    hs.task.new("/bin/zsh", function(exitCode, stdOut, stdErr)
-        if exitCode == 0 and stdOut and stdOut ~= "" then
-            writeFile(summaryPath, stdOut)
-            hs.notify.new({
-                title = "Worklog",
-                informativeText = "Summary saved for " .. date,
-                actionButtonTitle = "Open",
-                hasActionButton = true,
-            }):send()
-        else
-            local errMsg = stdErr or stdOut or "Unknown error"
-            hs.notify.new({
-                title = "Worklog",
-                informativeText = "Summary generation failed: " .. errMsg:sub(1, 100)
-            }):send()
+function M.regenerateAllWeekly()
+    local dates = getAllLogDates()
+    if #dates == 0 then
+        hs.notify.new({title = "Worklog", informativeText = "No log files found"}):send()
+        return
+    end
+    -- Find unique weeks
+    local seen = {}
+    local tasks = {}
+    for _, date in ipairs(dates) do
+        local _, weekLabel = getWeekDates(date)
+        if not seen[weekLabel] then
+            seen[weekLabel] = true
+            table.insert(tasks, {fn = M.generateWeekly, arg = date})
         end
-    end, {"-c", cmd}):start()
+    end
+    runStaggered(tasks, 30)
+end
+
+function M.regenerateAllMonthly()
+    local dates = getAllLogDates()
+    if #dates == 0 then
+        hs.notify.new({title = "Worklog", informativeText = "No log files found"}):send()
+        return
+    end
+    -- Find unique months
+    local seen = {}
+    local tasks = {}
+    for _, date in ipairs(dates) do
+        local ym = date:sub(1, 7)
+        if not seen[ym] then
+            seen[ym] = true
+            table.insert(tasks, {fn = M.generateMonthly, arg = ym})
+        end
+    end
+    runStaggered(tasks, 30)
+end
+
+function M.regenerateAllYearly()
+    local dates = getAllLogDates()
+    if #dates == 0 then
+        hs.notify.new({title = "Worklog", informativeText = "No log files found"}):send()
+        return
+    end
+    -- Find unique years
+    local seen = {}
+    local tasks = {}
+    for _, date in ipairs(dates) do
+        local y = date:sub(1, 4)
+        if not seen[y] then
+            seen[y] = true
+            table.insert(tasks, {fn = M.generateYearly, arg = y})
+        end
+    end
+    runStaggered(tasks, 30)
 end
 
 function M.startAutoSummary()
@@ -248,6 +511,19 @@ function M.startAutoSummary()
         if dayEnabled and timeStr == config.auto_summary_time and not generated[today] then
             generated[today] = true
             M.generate(today)
+
+            -- Weekly summary on Fridays (wday 6)
+            if now.wday == 6 then
+                -- Delay slightly so daily summary finishes first
+                hs.timer.doAfter(120, function() M.generateWeekly(today) end)
+            end
+
+            -- Monthly summary on last weekday of month
+            local tomorrow = os.time({year = now.year, month = now.month, day = now.day + 1})
+            local tomorrowMonth = tonumber(os.date("%m", tomorrow))
+            if tomorrowMonth ~= now.month then
+                hs.timer.doAfter(180, function() M.generateMonthly(os.date("%Y-%m")) end)
+            end
         end
     end)
 end
@@ -269,26 +545,41 @@ function M.showBrowser()
     end
 
     local summariesDir = getSummariesDir()
-    -- List summary files sorted newest first
-    local output, status = hs.execute(string.format("ls -1r '%s'/*.md 2>/dev/null", summariesDir))
+
+    -- Scan all subdirectories for summary files
+    local categories = {
+        {dir = "daily",   label = "Daily"},
+        {dir = "weekly",  label = "Weekly"},
+        {dir = "monthly", label = "Monthly"},
+        {dir = "yearly",  label = "Yearly"},
+    }
+
     local files = {}
-    if status and output and output ~= "" then
-        for path in output:gmatch("[^\n]+") do
-            local filename = path:match("([^/]+)$")
-            local date = filename:match("^(%d%d%d%d%-%d%d%-%d%d)%.md$")
-            if date then
-                -- Read first few lines for a preview
-                local content = readFile(path) or ""
-                local preview = ""
-                local lineCount = 0
-                for line in content:gmatch("[^\n]+") do
-                    if lineCount > 0 and line ~= "" and not line:match("^#") then
-                        preview = line:sub(1, 120)
-                        break
+    for _, cat in ipairs(categories) do
+        local dirPath = summariesDir .. "/" .. cat.dir
+        local output, status = hs.execute(string.format("ls -1r '%s'/*.md 2>/dev/null", dirPath))
+        if status and output and output ~= "" then
+            for path in output:gmatch("[^\n]+") do
+                local filename = path:match("([^/]+)$")
+                local name = filename:match("^(.+)%.md$")
+                if name then
+                    local content = readFile(path) or ""
+                    local preview = ""
+                    local lineCount = 0
+                    for line in content:gmatch("[^\n]+") do
+                        if lineCount > 0 and line ~= "" and not line:match("^#") then
+                            preview = line:sub(1, 120)
+                            break
+                        end
+                        lineCount = lineCount + 1
                     end
-                    lineCount = lineCount + 1
+                    table.insert(files, {
+                        date = name,
+                        path = path,
+                        preview = preview,
+                        label = cat.label,
+                    })
                 end
-                table.insert(files, {date = date, path = path, preview = preview})
             end
         end
     end
@@ -302,10 +593,10 @@ function M.showBrowser()
             local escaped_preview = f.preview:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
             items = items .. string.format(
                 '<a class="item" href="#" onclick="openFile(\'%s\'); return false;">'
-                .. '<div class="date">%s</div>'
+                .. '<div class="date"><span class="label">%s</span> %s</div>'
                 .. '<div class="preview">%s</div>'
                 .. '</a>',
-                f.path, f.date, escaped_preview
+                f.path, f.label, f.date, escaped_preview
             )
         end
     end
@@ -338,6 +629,7 @@ function M.showBrowser()
     .item:hover { background: #2d2d2d; border-color: #007acc; }
     .date { font-size: 14px; font-weight: 600; color: #ffffff; }
     .preview { font-size: 12px; color: #888; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .label { font-size: 11px; background: #333; color: #aaa; padding: 2px 6px; border-radius: 3px; margin-right: 6px; }
     .empty { color: #666; font-size: 13px; padding: 20px 0; text-align: center; }
 </style>
 </head>

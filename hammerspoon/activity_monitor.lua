@@ -57,8 +57,18 @@ local function buildMenu()
             fn = function() logger.show() end
         },
         {
-            title = "📊 Generate Summary",
-            fn = function() summary.generate() end
+            title = "📊 Generate",
+            menu = {
+                {title = "Today's Summary", fn = function() summary.generate() end},
+                {title = "This Week", fn = function() summary.generateWeekly() end},
+                {title = "This Month", fn = function() summary.generateMonthly() end},
+                {title = "This Year", fn = function() summary.generateYearly() end},
+                {title = "-"},
+                {title = "Regenerate All Daily", fn = function() summary.regenerateAllDaily() end},
+                {title = "Regenerate All Weekly", fn = function() summary.regenerateAllWeekly() end},
+                {title = "Regenerate All Monthly", fn = function() summary.regenerateAllMonthly() end},
+                {title = "Regenerate All Yearly", fn = function() summary.regenerateAllYearly() end},
+            }
         },
         { title = "-" },
         {
