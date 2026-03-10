@@ -29,6 +29,49 @@ local function getInstructionsPath()
     return config.base_path .. "/instructions.md"
 end
 
+local function getLocalInstructionsPath()
+    return config.base_path .. "/instructions.local.md"
+end
+
+-- Parse a section from instructions.local.md by header name
+-- Returns content under ## <section> until the next ## or end of file
+local function parseLocalSection(content, section)
+    if not content or content == "" then return "" end
+    local pattern = "##%s+" .. section .. "%s*\n(.-)\n##"
+    local match = content:match(pattern)
+    if not match then
+        -- Try matching to end of file (last section)
+        pattern = "##%s+" .. section .. "%s*\n(.+)$"
+        match = content:match(pattern)
+    end
+    if match then
+        return match:gsub("^%s+", ""):gsub("%s+$", "")
+    end
+    return ""
+end
+
+-- Get combined instructions for a given level (daily, weekly, monthly, yearly)
+local function getInstructions(level)
+    local base = readFile(getInstructionsPath()) or ""
+    local local_content = readFile(getLocalInstructionsPath()) or ""
+
+    local extra = ""
+    if local_content ~= "" then
+        local all = parseLocalSection(local_content, "All")
+        local specific = parseLocalSection(local_content, level:sub(1,1):upper() .. level:sub(2))
+        if all ~= "" then extra = all end
+        if specific ~= "" then
+            extra = extra ~= "" and (extra .. "\n\n" .. specific) or specific
+        end
+    end
+
+    if extra ~= "" then
+        base = base ~= "" and (base .. "\n\n" .. extra) or extra
+    end
+
+    return base
+end
+
 local function readFile(path)
     local f = io.open(path, "r")
     if not f then return nil end
@@ -432,7 +475,7 @@ function M.generate(date)
         return
     end
 
-    local instructions = readFile(getInstructionsPath()) or ""
+    local instructions = getInstructions("daily")
     local instructionsBlock = instructions ~= "" and ("## Custom Instructions\n\n" .. instructions) or ""
 
     local projectTimes, totalTracked, totalActive = calculateProjectTime(logContent)
@@ -478,7 +521,7 @@ function M.generateWeekly(date)
     local weekTimeStr = formatProjectTime(weekTimes, weekTotal, weekActive)
     local timeBlock = weekTimeStr ~= "" and ("## Weekly Time Breakdown\n\n" .. weekTimeStr .. "\nThese are aggregated from daily activity logs.") or ""
 
-    local instructions = readFile(getInstructionsPath()) or ""
+    local instructions = getInstructions("weekly")
     local instructionsBlock = instructions ~= "" and ("## Custom Instructions\n\n" .. instructions) or ""
 
     local prompt = loadPrompt("weekly", {
@@ -508,7 +551,7 @@ function M.generateMonthly(yearMonth)
         return
     end
 
-    local instructions = readFile(getInstructionsPath()) or ""
+    local instructions = getInstructions("monthly")
     local instructionsBlock = instructions ~= "" and ("## Custom Instructions\n\n" .. instructions) or ""
 
     local monthTimes, monthTotal, monthActive = aggregateProjectTime(dates)
@@ -558,7 +601,7 @@ function M.generateYearly(year)
         return
     end
 
-    local instructions = readFile(getInstructionsPath()) or ""
+    local instructions = getInstructions("yearly")
     local instructionsBlock = instructions ~= "" and ("## Custom Instructions\n\n" .. instructions) or ""
 
     local prompt = loadPrompt("yearly", {
