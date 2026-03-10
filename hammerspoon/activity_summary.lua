@@ -510,19 +510,30 @@ function M.startAutoSummary()
 
         if dayEnabled and timeStr == config.auto_summary_time and not generated[today] then
             generated[today] = true
-            M.generate(today)
 
-            -- Weekly summary on Fridays (wday 6)
-            if now.wday == 6 then
-                -- Delay slightly so daily summary finishes first
-                hs.timer.doAfter(120, function() M.generateWeekly(today) end)
+            -- At midnight, generate for yesterday since the date has rolled over
+            local summaryDate = today
+            if now.hour == 0 then
+                local yesterday = os.time(now) - 86400
+                summaryDate = os.date("%Y-%m-%d", yesterday)
             end
 
-            -- Monthly summary on last weekday of month
-            local tomorrow = os.time({year = now.year, month = now.month, day = now.day + 1})
-            local tomorrowMonth = tonumber(os.date("%m", tomorrow))
-            if tomorrowMonth ~= now.month then
-                hs.timer.doAfter(180, function() M.generateMonthly(os.date("%Y-%m")) end)
+            M.generate(summaryDate)
+
+            -- Weekly summary on Saturdays at midnight (end of Friday)
+            -- or Fridays if not running at midnight
+            local isWeekEnd = (now.hour == 0 and now.wday == 7) or (now.hour ~= 0 and now.wday == 6)
+            if isWeekEnd then
+                hs.timer.doAfter(120, function() M.generateWeekly(summaryDate) end)
+            end
+
+            -- Monthly summary when the previous day was the last day of its month
+            local prevDay = os.time(now) - (now.hour == 0 and 86400 or 0)
+            local prevMonth = tonumber(os.date("%m", prevDay))
+            local nextDay = prevDay + 86400
+            local nextMonth = tonumber(os.date("%m", nextDay))
+            if prevMonth ~= nextMonth then
+                hs.timer.doAfter(180, function() M.generateMonthly(os.date("%Y-%m", prevDay)) end)
             end
         end
     end)
