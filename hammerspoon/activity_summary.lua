@@ -29,6 +29,14 @@ local function getInstructionsPath()
     return config.base_path .. "/instructions.md"
 end
 
+local function readFile(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local content = f:read("*a")
+    f:close()
+    return content
+end
+
 local function getPromptPath(name)
     return config.base_path .. "/prompts/" .. name .. ".md"
 end
@@ -41,14 +49,6 @@ local function loadPrompt(name, vars)
         template = template:gsub("{{" .. key .. "}}", function() return value end)
     end
     return template
-end
-
-local function readFile(path)
-    local f = io.open(path, "r")
-    if not f then return nil end
-    local content = f:read("*a")
-    f:close()
-    return content
 end
 
 -- Parse unique git repos from the JSONL log, returning {display_path, expanded_path} pairs
