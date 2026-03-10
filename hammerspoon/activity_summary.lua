@@ -91,13 +91,37 @@ end
 -- Max gap in seconds before we stop attributing time (e.g., bathroom break)
 local MAX_GAP = 600  -- 10 minutes
 
+-- Apps/patterns that should be attributed to the most recent git project
+local DEV_TOOL_PATTERNS = {
+    {app = "Google Chrome", title_pattern = "localtest%.me"},
+    {app = "DBeaver"},
+    {app = "Loom"},
+}
+
+-- Check if a log entry is a dev tool that should be grouped with the last git project
+local function isDevTool(app, title)
+    for _, pattern in ipairs(DEV_TOOL_PATTERNS) do
+        if app == pattern.app then
+            if pattern.title_pattern then
+                if title and title:match(pattern.title_pattern) then
+                    return true
+                end
+            else
+                return true
+            end
+        end
+    end
+    return false
+end
+
 -- Calculate time spent per project from a JSONL log string
--- Returns a sorted list of {project, seconds} and total tracked seconds
+-- Returns a sorted list of {project, seconds}, total tracked seconds, and total active seconds
 local function calculateProjectTime(logContent)
-    if not logContent or logContent == "" then return {}, 0 end
+    if not logContent or logContent == "" then return {}, 0, 0 end
 
     local entries = {}
     local inIdle = false
+    local lastGitProject = nil
 
     for line in logContent:gmatch("[^\n]+") do
         local time = line:match('"time":"([^"]+)"')
@@ -116,10 +140,16 @@ local function calculateProjectTime(logContent)
         elseif entryType == "track" and not inIdle then
             local repo = line:match('"git_repo":"([^"]+)"')
             local app = line:match('"app":"([^"]+)"')
+            local title = line:match('"title":"([^"]*)"')
             local project
+
             if repo then
                 repo = repo:gsub("\\/", "/")
                 project = repo:match("([^/]+)$") or repo
+                lastGitProject = project
+            elseif isDevTool(app, title) and lastGitProject then
+                -- Attribute dev tools to the most recent git project
+                project = lastGitProject
             else
                 project = app or "Unknown"
             end
@@ -134,13 +164,14 @@ local function calculateProjectTime(logContent)
     -- Calculate time per project from consecutive entries
     local projectTime = {}
     local totalTracked = 0
+    local totalActive = 0
 
     for i = 1, #entries - 1 do
         local cur = entries[i]
         local nxt = entries[i + 1]
 
         -- Skip idle entries
-        if cur.idle or cur.idle_end or not cur.project then goto nextentry end
+        if cur.idle or cur.idle_end then goto nextentry end
 
         local gap = nxt.time - cur.time
         -- Handle day wraparound
@@ -152,8 +183,12 @@ local function calculateProjectTime(logContent)
             gap = 0
         end
 
-        projectTime[cur.project] = (projectTime[cur.project] or 0) + gap
-        totalTracked = totalTracked + gap
+        totalActive = totalActive + gap
+
+        if cur.project then
+            projectTime[cur.project] = (projectTime[cur.project] or 0) + gap
+            totalTracked = totalTracked + gap
+        end
 
         ::nextentry::
     end
@@ -165,14 +200,15 @@ local function calculateProjectTime(logContent)
     end
     table.sort(sorted, function(a, b) return a.seconds > b.seconds end)
 
-    return sorted, totalTracked
+    return sorted, totalTracked, totalActive
 end
 
 -- Format project time data as a readable string
-local function formatProjectTime(projectTimes, totalTracked)
+local function formatProjectTime(projectTimes, totalTracked, totalActive)
     if #projectTimes == 0 then return "" end
 
-    local result = "Total tracked: " .. formatDuration(totalTracked) .. "\n\n"
+    local result = "Total active: " .. formatDuration(totalActive or totalTracked) .. "\n"
+    result = result .. "Total project time: " .. formatDuration(totalTracked) .. "\n\n"
     for _, pt in ipairs(projectTimes) do
         local pct = totalTracked > 0 and math.floor(pt.seconds / totalTracked * 100) or 0
         result = result .. string.format("- **%s**: %s (%d%%)\n", pt.project, formatDuration(pt.seconds), pct)
@@ -184,13 +220,15 @@ end
 local function aggregateProjectTime(dates)
     local totals = {}
     local grandTotal = 0
+    local grandActive = 0
 
     for _, date in ipairs(dates) do
         local logPath = getLogPath(date)
         local logContent = readFile(logPath)
         if logContent and logContent ~= "" then
-            local projectTimes, totalTracked = calculateProjectTime(logContent)
+            local projectTimes, totalTracked, totalActive = calculateProjectTime(logContent)
             grandTotal = grandTotal + totalTracked
+            grandActive = grandActive + totalActive
             for _, pt in ipairs(projectTimes) do
                 totals[pt.project] = (totals[pt.project] or 0) + pt.seconds
             end
@@ -203,7 +241,7 @@ local function aggregateProjectTime(dates)
     end
     table.sort(sorted, function(a, b) return a.seconds > b.seconds end)
 
-    return sorted, grandTotal
+    return sorted, grandTotal, grandActive
 end
 
 -- Fetch git commits for the given date from each repo
@@ -395,8 +433,8 @@ function M.generate(date)
     local instructions = readFile(getInstructionsPath()) or ""
     local instructionsBlock = instructions ~= "" and ("## Custom Instructions\n\n" .. instructions) or ""
 
-    local projectTimes, totalTracked = calculateProjectTime(logContent)
-    local timeBreakdown = formatProjectTime(projectTimes, totalTracked)
+    local projectTimes, totalTracked, totalActive = calculateProjectTime(logContent)
+    local timeBreakdown = formatProjectTime(projectTimes, totalTracked, totalActive)
     local timeBlock = timeBreakdown ~= "" and ("## Time Breakdown\n\n" .. timeBreakdown .. "\nUse this data for the time breakdown in the summary. These are calculated from the log timestamps.") or ""
 
     local repos = parseRepos(logContent)
@@ -434,8 +472,8 @@ function M.generateWeekly(date)
         return
     end
 
-    local weekTimes, weekTotal = aggregateProjectTime(dates)
-    local weekTimeStr = formatProjectTime(weekTimes, weekTotal)
+    local weekTimes, weekTotal, weekActive = aggregateProjectTime(dates)
+    local weekTimeStr = formatProjectTime(weekTimes, weekTotal, weekActive)
     local timeBlock = weekTimeStr ~= "" and ("## Weekly Time Breakdown\n\n" .. weekTimeStr .. "\nThese are aggregated from daily activity logs.") or ""
 
     local instructions = readFile(getInstructionsPath()) or ""
@@ -471,8 +509,8 @@ function M.generateMonthly(yearMonth)
     local instructions = readFile(getInstructionsPath()) or ""
     local instructionsBlock = instructions ~= "" and ("## Custom Instructions\n\n" .. instructions) or ""
 
-    local monthTimes, monthTotal = aggregateProjectTime(dates)
-    local monthTimeStr = formatProjectTime(monthTimes, monthTotal)
+    local monthTimes, monthTotal, monthActive = aggregateProjectTime(dates)
+    local monthTimeStr = formatProjectTime(monthTimes, monthTotal, monthActive)
     local timeBlock = monthTimeStr ~= "" and ("## Monthly Time Breakdown\n\n" .. monthTimeStr .. "\nThese are aggregated from daily activity logs.") or ""
 
     local prompt = loadPrompt("monthly", {
