@@ -56,6 +56,142 @@ local function parseRepos(logContent)
     return repos
 end
 
+-- Parse a HH:MM:SS time string to seconds since midnight
+local function timeToSeconds(timeStr)
+    local h, m, s = timeStr:match("(%d+):(%d+):(%d+)")
+    if not h then return nil end
+    return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+end
+
+-- Format seconds into a human-readable duration
+local function formatDuration(secs)
+    if secs < 60 then return string.format("%ds", secs) end
+    local hours = math.floor(secs / 3600)
+    local mins = math.floor((secs % 3600) / 60)
+    if hours > 0 then
+        return string.format("%dh %dm", hours, mins)
+    end
+    return string.format("%dm", mins)
+end
+
+-- Max gap in seconds before we stop attributing time (e.g., bathroom break)
+local MAX_GAP = 600  -- 10 minutes
+
+-- Calculate time spent per project from a JSONL log string
+-- Returns a sorted list of {project, seconds} and total tracked seconds
+local function calculateProjectTime(logContent)
+    if not logContent or logContent == "" then return {}, 0 end
+
+    local entries = {}
+    local inIdle = false
+
+    for line in logContent:gmatch("[^\n]+") do
+        local time = line:match('"time":"([^"]+)"')
+        local entryType = line:match('"type":"([^"]+)"')
+        if not time or not entryType then goto nextline end
+
+        local secs = timeToSeconds(time)
+        if not secs then goto nextline end
+
+        if entryType == "idle_start" then
+            inIdle = true
+            table.insert(entries, {time = secs, project = nil, idle = true})
+        elseif entryType == "idle_end" then
+            inIdle = false
+            table.insert(entries, {time = secs, project = nil, idle_end = true})
+        elseif entryType == "track" and not inIdle then
+            local repo = line:match('"git_repo":"([^"]+)"')
+            local app = line:match('"app":"([^"]+)"')
+            local project
+            if repo then
+                repo = repo:gsub("\\/", "/")
+                project = repo:match("([^/]+)$") or repo
+            else
+                project = app or "Unknown"
+            end
+            table.insert(entries, {time = secs, project = project})
+        elseif entryType == "manual" and not inIdle then
+            table.insert(entries, {time = secs, project = nil, manual = true})
+        end
+
+        ::nextline::
+    end
+
+    -- Calculate time per project from consecutive entries
+    local projectTime = {}
+    local totalTracked = 0
+
+    for i = 1, #entries - 1 do
+        local cur = entries[i]
+        local nxt = entries[i + 1]
+
+        -- Skip idle entries
+        if cur.idle or cur.idle_end or not cur.project then goto nextentry end
+
+        local gap = nxt.time - cur.time
+        -- Handle day wraparound
+        if gap < 0 then gap = gap + 86400 end
+        -- Cap the gap
+        if gap > MAX_GAP then gap = MAX_GAP end
+        -- Don't count time into idle
+        if nxt.idle then
+            gap = 0
+        end
+
+        projectTime[cur.project] = (projectTime[cur.project] or 0) + gap
+        totalTracked = totalTracked + gap
+
+        ::nextentry::
+    end
+
+    -- Sort by time descending
+    local sorted = {}
+    for project, secs in pairs(projectTime) do
+        table.insert(sorted, {project = project, seconds = secs})
+    end
+    table.sort(sorted, function(a, b) return a.seconds > b.seconds end)
+
+    return sorted, totalTracked
+end
+
+-- Format project time data as a readable string
+local function formatProjectTime(projectTimes, totalTracked)
+    if #projectTimes == 0 then return "" end
+
+    local result = "Total tracked: " .. formatDuration(totalTracked) .. "\n\n"
+    for _, pt in ipairs(projectTimes) do
+        local pct = totalTracked > 0 and math.floor(pt.seconds / totalTracked * 100) or 0
+        result = result .. string.format("- **%s**: %s (%d%%)\n", pt.project, formatDuration(pt.seconds), pct)
+    end
+    return result
+end
+
+-- Aggregate project time across multiple dates from their log files
+local function aggregateProjectTime(dates)
+    local totals = {}
+    local grandTotal = 0
+
+    for _, date in ipairs(dates) do
+        local logPath = getLogPath(date)
+        local logContent = readFile(logPath)
+        if logContent and logContent ~= "" then
+            local projectTimes, totalTracked = calculateProjectTime(logContent)
+            grandTotal = grandTotal + totalTracked
+            for _, pt in ipairs(projectTimes) do
+                totals[pt.project] = (totals[pt.project] or 0) + pt.seconds
+            end
+        end
+    end
+
+    local sorted = {}
+    for project, secs in pairs(totals) do
+        table.insert(sorted, {project = project, seconds = secs})
+    end
+    table.sort(sorted, function(a, b) return a.seconds > b.seconds end)
+
+    return sorted, grandTotal
+end
+
 -- Fetch git commits for the given date from each repo
 local function getGitCommits(repos, date)
     if #repos == 0 then return "" end
@@ -258,6 +394,13 @@ function M.generate(date)
 
     prompt = prompt .. "## Activity Log\n\n```\n" .. logContent .. "```\n\n"
 
+    local projectTimes, totalTracked = calculateProjectTime(logContent)
+    local timeBreakdown = formatProjectTime(projectTimes, totalTracked)
+    if timeBreakdown ~= "" then
+        prompt = prompt .. "## Time Breakdown\n\n" .. timeBreakdown .. "\n"
+        prompt = prompt .. "Use this data for the time breakdown in the summary. These are calculated from the log timestamps.\n\n"
+    end
+
     local repos = parseRepos(logContent)
 
     local gitCommits = getGitCommits(repos, date)
@@ -278,6 +421,7 @@ function M.generate(date)
     prompt = prompt .. "## Task\n\n"
     prompt = prompt .. "Write a concise markdown summary of what was worked on today. "
     prompt = prompt .. "Group related activities together. Include approximate time ranges. "
+    prompt = prompt .. "Include a '## Time Breakdown' section showing time per project with percentages. "
     prompt = prompt .. "Include a '## Commits' section that lists all git commits grouped by project. "
     prompt = prompt .. "For each commit, show the short hash and message. If a commit message is long, summarize it briefly. "
     prompt = prompt .. "Use headers and bullet points. Start the document with `# Summary - " .. date .. "`. "
@@ -298,16 +442,24 @@ function M.generateWeekly(date)
         return
     end
 
+    local weekTimes, weekTotal = aggregateProjectTime(dates)
+    local weekTimeStr = formatProjectTime(weekTimes, weekTotal)
+
     local instructions = readFile(getInstructionsPath()) or ""
     local prompt = "You are generating a weekly summary from daily work summaries.\n\n"
     if instructions ~= "" then
         prompt = prompt .. "## Custom Instructions\n\n" .. instructions .. "\n\n"
     end
     prompt = prompt .. "## Daily Summaries\n\n" .. content .. "\n"
+    if weekTimeStr ~= "" then
+        prompt = prompt .. "## Weekly Time Breakdown\n\n" .. weekTimeStr .. "\n"
+        prompt = prompt .. "These are aggregated from daily activity logs.\n\n"
+    end
     prompt = prompt .. "## Task\n\n"
     prompt = prompt .. "Write a concise weekly summary covering " .. dates[1] .. " through " .. dates[5] .. " (Mon-Fri). "
     prompt = prompt .. "Start with `# Weekly Summary - " .. dates[1] .. " to " .. dates[5] .. "`. "
     prompt = prompt .. "Immediately after the title, include a '## TLDR' with 3-4 sentences on the week's highlights. "
+    prompt = prompt .. "Include a '## Time Breakdown' section showing total time per project for the week with percentages. "
     prompt = prompt .. "Then group by project or theme. Highlight key accomplishments, PRs merged, and patterns (e.g. heavy meeting days vs deep work days). "
     prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
 
@@ -330,11 +482,20 @@ function M.generateMonthly(yearMonth)
     if instructions ~= "" then
         prompt = prompt .. "## Custom Instructions\n\n" .. instructions .. "\n\n"
     end
+
+    local monthTimes, monthTotal = aggregateProjectTime(dates)
+    local monthTimeStr = formatProjectTime(monthTimes, monthTotal)
+
     prompt = prompt .. "## Daily Summaries\n\n" .. content .. "\n"
+    if monthTimeStr ~= "" then
+        prompt = prompt .. "## Monthly Time Breakdown\n\n" .. monthTimeStr .. "\n"
+        prompt = prompt .. "These are aggregated from daily activity logs.\n\n"
+    end
     prompt = prompt .. "## Task\n\n"
     prompt = prompt .. "Write a concise monthly summary for " .. yearMonth .. ". "
     prompt = prompt .. "Start with `# Monthly Summary - " .. yearMonth .. "`. "
     prompt = prompt .. "Immediately after the title, include a '## TLDR' with 4-5 sentences on the month's highlights. "
+    prompt = prompt .. "Include a '## Time Breakdown' section showing total time per project for the month with percentages. "
     prompt = prompt .. "Then organize by project or major theme. Highlight key accomplishments, milestones, and how time was distributed. "
     prompt = prompt .. "Note trends — what took the most time, what was recurring, any shifts in focus. "
     prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
