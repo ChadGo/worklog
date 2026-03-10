@@ -207,12 +207,14 @@ end
 local function formatProjectTime(projectTimes, totalTracked, totalActive)
     if #projectTimes == 0 then return "" end
 
-    local result = "Total active: " .. formatDuration(totalActive or totalTracked) .. "\n"
-    result = result .. "Total project time: " .. formatDuration(totalTracked) .. "\n\n"
+    local result = ""
     for _, pt in ipairs(projectTimes) do
         local pct = totalTracked > 0 and math.floor(pt.seconds / totalTracked * 100) or 0
         result = result .. string.format("- **%s**: %s (%d%%)\n", pt.project, formatDuration(pt.seconds), pct)
     end
+    result = result .. "\n"
+    result = result .. "**Total project time**: " .. formatDuration(totalTracked) .. "\n"
+    result = result .. "**Total active time**: " .. formatDuration(totalActive or totalTracked) .. "\n"
     return result
 end
 
