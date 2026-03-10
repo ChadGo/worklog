@@ -60,6 +60,7 @@ local function buildMenu()
             title = "📊 Generate",
             menu = {
                 {title = "Today's Summary", fn = function() summary.generate() end},
+                {title = "Summary for Date...", fn = function() summary.showDatePicker() end},
                 {title = "This Week", fn = function() summary.generateWeekly() end},
                 {title = "This Month", fn = function() summary.generateMonthly() end},
                 {title = "This Year", fn = function() summary.generateYearly() end},

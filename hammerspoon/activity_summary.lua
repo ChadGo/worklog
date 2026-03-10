@@ -890,4 +890,134 @@ function M.showBrowser()
     browserWebview:bringToFront(true)
 end
 
+-- Date picker dialog for generating a summary for a specific date
+local datePickerWebview = nil
+
+function M.showDatePicker()
+    if datePickerWebview then
+        datePickerWebview:delete()
+        datePickerWebview = nil
+    end
+
+    local yesterday = os.date("%Y-%m-%d", os.time() - 86400)
+
+    local html = [[
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        background: #1e1e1e;
+        color: #cccccc;
+        padding: 16px;
+        -webkit-user-select: none;
+    }
+    h2 { font-size: 14px; font-weight: 600; color: #ffffff; margin-bottom: 12px; }
+    input[type="date"] {
+        width: 100%;
+        background: #2d2d2d;
+        border: 1px solid #404040;
+        border-radius: 6px;
+        color: #cccccc;
+        font-family: inherit;
+        font-size: 14px;
+        padding: 8px 10px;
+        outline: none;
+        color-scheme: dark;
+    }
+    input[type="date"]:focus { border-color: #007acc; }
+    .buttons {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 12px;
+    }
+    button {
+        padding: 6px 16px;
+        border-radius: 4px;
+        border: 1px solid #404040;
+        font-size: 13px;
+        cursor: pointer;
+        background: #2d2d2d;
+        color: #cccccc;
+    }
+    button:hover { background: #3d3d3d; }
+    button.primary {
+        background: #007acc;
+        border-color: #007acc;
+        color: #ffffff;
+    }
+    button.primary:hover { background: #0098ff; }
+</style>
+</head>
+<body>
+    <h2>Generate Summary for Date</h2>
+    <input type="date" id="datepicker" value="]] .. yesterday .. [[" autofocus>
+    <div class="buttons">
+        <button onclick="cancel()">Cancel</button>
+        <button class="primary" onclick="submit()">Generate</button>
+    </div>
+    <script>
+        function submit() {
+            var date = document.getElementById("datepicker").value;
+            if (date) {
+                window.webkit.messageHandlers.hammerspoon.postMessage("generate:" + date);
+            }
+        }
+        function cancel() {
+            window.webkit.messageHandlers.hammerspoon.postMessage("close");
+        }
+        document.addEventListener("keydown", function(e) {
+            if (e.key === "Enter") { submit(); }
+            else if (e.key === "Escape") { cancel(); }
+        });
+    </script>
+</body>
+</html>
+]]
+
+    local screen = hs.screen.mainScreen():frame()
+    local width = 350
+    local height = 150
+    local rect = hs.geometry.rect(
+        (screen.w - width) / 2,
+        (screen.h - height) / 2,
+        width,
+        height
+    )
+
+    local uc = hs.webview.usercontent.new("hammerspoon")
+    uc:setCallback(function(msg)
+        local body = msg.body
+        if type(body) == "string" and body:sub(1, 9) == "generate:" then
+            local date = body:sub(10)
+            if datePickerWebview then
+                datePickerWebview:delete()
+                datePickerWebview = nil
+            end
+            M.generate(date)
+        elseif body == "close" then
+            if datePickerWebview then
+                datePickerWebview:delete()
+                datePickerWebview = nil
+            end
+        end
+    end)
+
+    datePickerWebview = hs.webview.new(rect, {developerExtrasEnabled = false}, uc)
+    datePickerWebview:windowStyle(
+        hs.webview.windowMasks.titled |
+        hs.webview.windowMasks.closable
+    )
+    datePickerWebview:windowTitle("Worklog - Generate Summary")
+    datePickerWebview:allowTextEntry(true)
+    datePickerWebview:level(hs.drawing.windowLevels.floating)
+    datePickerWebview:darkMode(true)
+    datePickerWebview:html(html)
+    datePickerWebview:show()
+    datePickerWebview:bringToFront(true)
+end
+
 return M
