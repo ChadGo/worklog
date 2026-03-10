@@ -29,6 +29,20 @@ local function getInstructionsPath()
     return config.base_path .. "/instructions.md"
 end
 
+local function getPromptPath(name)
+    return config.base_path .. "/prompts/" .. name .. ".md"
+end
+
+-- Load a prompt template and substitute {{key}} placeholders
+local function loadPrompt(name, vars)
+    local template = readFile(getPromptPath(name))
+    if not template then return nil end
+    for key, value in pairs(vars) do
+        template = template:gsub("{{" .. key .. "}}", function() return value end)
+    end
+    return template
+end
+
 local function readFile(path)
     local f = io.open(path, "r")
     if not f then return nil end
@@ -379,55 +393,33 @@ function M.generate(date)
     end
 
     local instructions = readFile(getInstructionsPath()) or ""
-
-    local prompt = "You are summarizing a day's computer activity log into a concise markdown summary.\n\n"
-    prompt = prompt .. "The log is in JSONL format. Each line is a JSON object with these fields:\n"
-    prompt = prompt .. '- type "track": automatic window tracking with "time", "app", "bundle_id", "title", and optionally "cwd" (working directory), "git_repo" (project root), "git_branch" (current branch)\n'
-    prompt = prompt .. '- type "manual": user-written log entry with "time", "text"\n'
-    prompt = prompt .. '- type "idle_start": user went idle, with "idle_seconds"\n'
-    prompt = prompt .. '- type "idle_end": user returned from idle\n'
-    prompt = prompt .. 'The "cwd" field indicates the working directory. "git_repo" and "git_branch" indicate the project and branch being worked on. Use these to group activities by project.\n\n'
-
-    if instructions ~= "" then
-        prompt = prompt .. "## Custom Instructions\n\n" .. instructions .. "\n\n"
-    end
-
-    prompt = prompt .. "## Activity Log\n\n```\n" .. logContent .. "```\n\n"
+    local instructionsBlock = instructions ~= "" and ("## Custom Instructions\n\n" .. instructions) or ""
 
     local projectTimes, totalTracked = calculateProjectTime(logContent)
     local timeBreakdown = formatProjectTime(projectTimes, totalTracked)
-    if timeBreakdown ~= "" then
-        prompt = prompt .. "## Time Breakdown\n\n" .. timeBreakdown .. "\n"
-        prompt = prompt .. "Use this data for the time breakdown in the summary. These are calculated from the log timestamps.\n\n"
-    end
+    local timeBlock = timeBreakdown ~= "" and ("## Time Breakdown\n\n" .. timeBreakdown .. "\nUse this data for the time breakdown in the summary. These are calculated from the log timestamps.") or ""
 
     local repos = parseRepos(logContent)
 
     local gitCommits = getGitCommits(repos, date)
-    if gitCommits ~= "" then
-        prompt = prompt .. "## Git Commits Made Today\n\n" .. gitCommits .. "\n"
-        prompt = prompt .. "Use these commits to understand what was actually accomplished in each project. "
-        prompt = prompt .. "The commit messages provide concrete details about the work done.\n\n"
-    end
+    local commitsBlock = gitCommits ~= "" and ("## Git Commits Made Today\n\n" .. gitCommits .. "\nUse these commits to understand what was actually accomplished in each project. The commit messages provide concrete details about the work done.") or ""
 
     local prActivity = getPRActivity(repos, date)
-    if prActivity ~= "" then
-        prompt = prompt .. "## GitHub PR Activity Today\n\n" .. prActivity .. "\n"
-        prompt = prompt .. "Include PR activity in the summary — PRs opened, updated, reviewed, or merged.\n\n"
-    else
-        prompt = prompt .. "## GitHub PR Activity Today\n\nNo PR activity found.\n\n"
-    end
+    local prBlock = prActivity ~= "" and ("## GitHub PR Activity Today\n\n" .. prActivity .. "\nInclude PR activity in the summary — PRs opened, updated, reviewed, or merged.") or "## GitHub PR Activity Today\n\nNo PR activity found."
 
-    prompt = prompt .. "## Task\n\n"
-    prompt = prompt .. "Write a concise markdown summary of what was worked on today. "
-    prompt = prompt .. "Group related activities together. Include approximate time ranges. "
-    prompt = prompt .. "Include a '## Time Breakdown' section showing time per project with percentages. "
-    prompt = prompt .. "Include a '## Commits' section that lists all git commits grouped by project. "
-    prompt = prompt .. "For each commit, show the short hash and message. If a commit message is long, summarize it briefly. "
-    prompt = prompt .. "Use headers and bullet points. Start the document with `# Summary - " .. date .. "`. "
-    prompt = prompt .. "Immediately after the title, include a '## TLDR' section with 3-4 sentences summarizing where most time was spent. "
-    prompt = prompt .. "Focus on the big picture — e.g. 'Spent most of the day in meetings, with the rest focused on X' or 'Deep work day primarily on X and Y'. "
-    prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
+    local prompt = loadPrompt("daily", {
+        instructions = instructionsBlock,
+        log = logContent,
+        time_breakdown = timeBlock,
+        git_commits = commitsBlock,
+        pr_activity = prBlock,
+        date = date,
+    })
+
+    if not prompt then
+        hs.notify.new({title = "Worklog", informativeText = "Missing prompt template: prompts/daily.md"}):send()
+        return
+    end
 
     runClaude(prompt, getSummaryPath(date), "Summary for " .. date)
 end
@@ -444,24 +436,23 @@ function M.generateWeekly(date)
 
     local weekTimes, weekTotal = aggregateProjectTime(dates)
     local weekTimeStr = formatProjectTime(weekTimes, weekTotal)
+    local timeBlock = weekTimeStr ~= "" and ("## Weekly Time Breakdown\n\n" .. weekTimeStr .. "\nThese are aggregated from daily activity logs.") or ""
 
     local instructions = readFile(getInstructionsPath()) or ""
-    local prompt = "You are generating a weekly summary from daily work summaries.\n\n"
-    if instructions ~= "" then
-        prompt = prompt .. "## Custom Instructions\n\n" .. instructions .. "\n\n"
+    local instructionsBlock = instructions ~= "" and ("## Custom Instructions\n\n" .. instructions) or ""
+
+    local prompt = loadPrompt("weekly", {
+        instructions = instructionsBlock,
+        content = content,
+        time_breakdown = timeBlock,
+        start_date = dates[1],
+        end_date = dates[5],
+    })
+
+    if not prompt then
+        hs.notify.new({title = "Worklog", informativeText = "Missing prompt template: prompts/weekly.md"}):send()
+        return
     end
-    prompt = prompt .. "## Daily Summaries\n\n" .. content .. "\n"
-    if weekTimeStr ~= "" then
-        prompt = prompt .. "## Weekly Time Breakdown\n\n" .. weekTimeStr .. "\n"
-        prompt = prompt .. "These are aggregated from daily activity logs.\n\n"
-    end
-    prompt = prompt .. "## Task\n\n"
-    prompt = prompt .. "Write a concise weekly summary covering " .. dates[1] .. " through " .. dates[5] .. " (Mon-Fri). "
-    prompt = prompt .. "Start with `# Weekly Summary - " .. dates[1] .. " to " .. dates[5] .. "`. "
-    prompt = prompt .. "Immediately after the title, include a '## TLDR' with 3-4 sentences on the week's highlights. "
-    prompt = prompt .. "Include a '## Time Breakdown' section showing total time per project for the week with percentages. "
-    prompt = prompt .. "Then group by project or theme. Highlight key accomplishments, PRs merged, and patterns (e.g. heavy meeting days vs deep work days). "
-    prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
 
     local outputPath = getSummariesDir() .. "/weekly/" .. weekLabel .. ".md"
     runClaude(prompt, outputPath, "Weekly summary " .. weekLabel)
@@ -478,27 +469,23 @@ function M.generateMonthly(yearMonth)
     end
 
     local instructions = readFile(getInstructionsPath()) or ""
-    local prompt = "You are generating a monthly summary from daily work summaries.\n\n"
-    if instructions ~= "" then
-        prompt = prompt .. "## Custom Instructions\n\n" .. instructions .. "\n\n"
-    end
+    local instructionsBlock = instructions ~= "" and ("## Custom Instructions\n\n" .. instructions) or ""
 
     local monthTimes, monthTotal = aggregateProjectTime(dates)
     local monthTimeStr = formatProjectTime(monthTimes, monthTotal)
+    local timeBlock = monthTimeStr ~= "" and ("## Monthly Time Breakdown\n\n" .. monthTimeStr .. "\nThese are aggregated from daily activity logs.") or ""
 
-    prompt = prompt .. "## Daily Summaries\n\n" .. content .. "\n"
-    if monthTimeStr ~= "" then
-        prompt = prompt .. "## Monthly Time Breakdown\n\n" .. monthTimeStr .. "\n"
-        prompt = prompt .. "These are aggregated from daily activity logs.\n\n"
+    local prompt = loadPrompt("monthly", {
+        instructions = instructionsBlock,
+        content = content,
+        time_breakdown = timeBlock,
+        year_month = yearMonth,
+    })
+
+    if not prompt then
+        hs.notify.new({title = "Worklog", informativeText = "Missing prompt template: prompts/monthly.md"}):send()
+        return
     end
-    prompt = prompt .. "## Task\n\n"
-    prompt = prompt .. "Write a concise monthly summary for " .. yearMonth .. ". "
-    prompt = prompt .. "Start with `# Monthly Summary - " .. yearMonth .. "`. "
-    prompt = prompt .. "Immediately after the title, include a '## TLDR' with 4-5 sentences on the month's highlights. "
-    prompt = prompt .. "Include a '## Time Breakdown' section showing total time per project for the month with percentages. "
-    prompt = prompt .. "Then organize by project or major theme. Highlight key accomplishments, milestones, and how time was distributed. "
-    prompt = prompt .. "Note trends — what took the most time, what was recurring, any shifts in focus. "
-    prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
 
     local outputPath = getSummariesDir() .. "/monthly/" .. yearMonth .. ".md"
     runClaude(prompt, outputPath, "Monthly summary " .. yearMonth)
@@ -532,17 +519,18 @@ function M.generateYearly(year)
     end
 
     local instructions = readFile(getInstructionsPath()) or ""
-    local prompt = "You are generating a yearly summary from monthly (or daily) work summaries.\n\n"
-    if instructions ~= "" then
-        prompt = prompt .. "## Custom Instructions\n\n" .. instructions .. "\n\n"
+    local instructionsBlock = instructions ~= "" and ("## Custom Instructions\n\n" .. instructions) or ""
+
+    local prompt = loadPrompt("yearly", {
+        instructions = instructionsBlock,
+        content = content,
+        year = year,
+    })
+
+    if not prompt then
+        hs.notify.new({title = "Worklog", informativeText = "Missing prompt template: prompts/yearly.md"}):send()
+        return
     end
-    prompt = prompt .. "## Summaries\n\n" .. content .. "\n"
-    prompt = prompt .. "## Task\n\n"
-    prompt = prompt .. "Write a yearly summary for " .. year .. ". "
-    prompt = prompt .. "Start with `# Yearly Summary - " .. year .. "`. "
-    prompt = prompt .. "Immediately after the title, include a '## TLDR' with 5-6 sentences on the year's highlights. "
-    prompt = prompt .. "Organize by quarter or major theme. Highlight key projects, accomplishments, and how focus shifted over the year. "
-    prompt = prompt .. "Output ONLY the markdown summary, no preamble or explanation."
 
     local outputPath = summariesDir .. "/yearly/" .. year .. ".md"
     runClaude(prompt, outputPath, "Yearly summary " .. year)
