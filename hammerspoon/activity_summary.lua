@@ -25,6 +25,14 @@ local function getSummaryPath(date)
     return getSummariesDir() .. "/daily/" .. date .. ".md"
 end
 
+local function readFile(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local content = f:read("*a")
+    f:close()
+    return content
+end
+
 local function getInstructionsPath()
     return config.base_path .. "/instructions.md"
 end
@@ -70,14 +78,6 @@ local function getInstructions(level)
     end
 
     return base
-end
-
-local function readFile(path)
-    local f = io.open(path, "r")
-    if not f then return nil end
-    local content = f:read("*a")
-    f:close()
-    return content
 end
 
 local function getPromptPath(name)
