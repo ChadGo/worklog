@@ -71,7 +71,7 @@ Use this for:
 
 **Manual:** Press `Ctrl+Shift+S` or use the menu bar to generate a summary anytime.
 
-**Automatic:** By default, a summary is generated at 5:30 PM on weekdays. Configure this in `config.lua`.
+**Automatic:** By default, the previous day's summary is generated at midnight every day. If the Mac is asleep at that time, it runs as soon as the Mac is awake again (weekly and monthly summaries catch up the same way). Configure the time and days in `config.lua`.
 
 Summaries are saved to `summaries/YYYY-MM-DD.md` and include:
 - **TLDR** — 3-4 sentence overview of how time was spent

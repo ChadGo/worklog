@@ -2,6 +2,7 @@ local M = {}
 
 local config = nil
 local autoSummaryTimer = nil
+local wakeWatcher = nil
 
 function M.init(cfg)
     config = cfg
@@ -31,6 +32,12 @@ local function readFile(path)
     local content = f:read("*a")
     f:close()
     return content
+end
+
+local function fileExists(path)
+    local f = io.open(path, "r")
+    if f then f:close() return true end
+    return false
 end
 
 local function getInstructionsPath()
@@ -718,63 +725,96 @@ function M.regenerateAllYearly()
     runStaggered(tasks, 30)
 end
 
-function M.startAutoSummary()
-    if not config.auto_summary_enabled then return end
-    if autoSummaryTimer then
-        autoSummaryTimer:stop()
+-- Which date the scheduled run should summarize. When the run time is in the
+-- midnight hour the date has already rolled over, so summarize yesterday.
+local function scheduledSummaryDate(now)
+    local cfgHour = tonumber((config.auto_summary_time or "00:00"):match("^(%d+)")) or 0
+    local t = os.time({year = now.year, month = now.month, day = now.day, hour = 12})
+    if cfgHour == 0 then
+        t = os.time({year = now.year, month = now.month, day = now.day - 1, hour = 12})
+    end
+    return os.date("%Y-%m-%d", t), t
+end
+
+-- Generate whatever the scheduled run should have produced and hasn't yet.
+-- Uses file existence as the guard, so it is safe to call after a missed run
+-- (machine asleep at the scheduled time) without duplicating work.
+local function runScheduledSummaries()
+    local now = os.date("*t")
+    local summaryDate, summaryTime = scheduledSummaryDate(now)
+    local st = os.date("*t", summaryTime)
+
+    -- Daily
+    if fileExists(getLogPath(summaryDate)) and not fileExists(getSummaryPath(summaryDate)) then
+        M.generate(summaryDate)
     end
 
-    -- Check every 60 seconds if it's time to generate
-    local generated = {}
-    autoSummaryTimer = hs.timer.doEvery(60, function()
+    -- Weekly: when the summarized day is a Friday
+    if st.wday == 6 then
+        local _, weekLabel = getWeekDates(summaryDate)
+        if not fileExists(getSummariesDir() .. "/weekly/" .. weekLabel .. ".md") then
+            hs.timer.doAfter(120, function() M.generateWeekly(summaryDate) end)
+        end
+    end
+
+    -- Monthly: when the summarized day is the last day of its month
+    local nextDayMonth = tonumber(os.date("%m", summaryTime + 86400))
+    if nextDayMonth ~= st.month then
+        local yearMonth = os.date("%Y-%m", summaryTime)
+        if not fileExists(getSummariesDir() .. "/monthly/" .. yearMonth .. ".md") then
+            hs.timer.doAfter(180, function() M.generateMonthly(yearMonth) end)
+        end
+    end
+end
+
+function M.startAutoSummary()
+    if not config.auto_summary_enabled then return end
+    M.stopAutoSummary()
+
+    -- Once per day, at or after auto_summary_time, run the scheduled summaries.
+    -- "At or after" (rather than exact-minute match) means a run missed while
+    -- the machine was asleep happens as soon as it is awake again.
+    local ran = {}
+    local function check()
         local now = os.date("*t")
         local today = os.date("%Y-%m-%d")
-        local timeStr = string.format("%02d:%02d", now.hour, now.min)
+        if ran[today] then return end
 
-        -- Check if today is an enabled day
         local dayEnabled = false
         for _, d in ipairs(config.auto_summary_days or {}) do
-            if d == now.wday then
-                dayEnabled = true
-                break
-            end
+            if d == now.wday then dayEnabled = true break end
         end
+        if not dayEnabled then return end
 
-        if dayEnabled and timeStr == config.auto_summary_time and not generated[today] then
-            generated[today] = true
+        local timeStr = string.format("%02d:%02d", now.hour, now.min)
+        if timeStr < (config.auto_summary_time or "00:00") then return end
 
-            -- At midnight, generate for yesterday since the date has rolled over
-            local summaryDate = today
-            if now.hour == 0 then
-                local yesterday = os.time(now) - 86400
-                summaryDate = os.date("%Y-%m-%d", yesterday)
-            end
+        ran[today] = true
+        runScheduledSummaries()
+    end
 
-            M.generate(summaryDate)
+    autoSummaryTimer = hs.timer.doEvery(60, check)
 
-            -- Weekly summary on Saturdays at midnight (end of Friday)
-            -- or Fridays if not running at midnight
-            local isWeekEnd = (now.hour == 0 and now.wday == 7) or (now.hour ~= 0 and now.wday == 6)
-            if isWeekEnd then
-                hs.timer.doAfter(120, function() M.generateWeekly(summaryDate) end)
-            end
-
-            -- Monthly summary when the previous day was the last day of its month
-            local prevDay = os.time(now) - (now.hour == 0 and 86400 or 0)
-            local prevMonth = tonumber(os.date("%m", prevDay))
-            local nextDay = prevDay + 86400
-            local nextMonth = tonumber(os.date("%m", nextDay))
-            if prevMonth ~= nextMonth then
-                hs.timer.doAfter(180, function() M.generateMonthly(os.date("%Y-%m", prevDay)) end)
-            end
+    -- Timers do not fire while asleep; re-check shortly after waking so the
+    -- catch-up does not wait for the next tick.
+    wakeWatcher = hs.caffeinate.watcher.new(function(event)
+        if event == hs.caffeinate.watcher.systemDidWake then
+            hs.timer.doAfter(15, check)
         end
-    end)
+    end):start()
+
+    -- Catch up right after (re)load as well
+    hs.timer.doAfter(10, check)
 end
 
 function M.stopAutoSummary()
     if autoSummaryTimer then
         autoSummaryTimer:stop()
         autoSummaryTimer = nil
+    end
+    if wakeWatcher then
+        wakeWatcher:stop()
+        wakeWatcher = nil
     end
 end
 
