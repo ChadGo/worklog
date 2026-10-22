@@ -3,3 +3,4 @@ summaries/
 .DS_Store
 instructions.local.md
 reviews/
+hammerspoon/config.local.lua

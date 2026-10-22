@@ -14,29 +14,45 @@ A Hammerspoon tool that tracks your computer activity throughout the day and gen
 
 ### Prerequisites
 
-- [Hammerspoon](https://www.hammerspoon.org/) installed
-- [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) installed and configured
-- [GitHub CLI](https://cli.github.com/) (`gh`) installed and authenticated (for PR activity)
+- macOS with [Homebrew](https://brew.sh)
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and signed in. The installer checks for it but does not install it, because the first run has to be interactive:
+
+```sh
+curl -fsSL https://claude.ai/install.sh | bash
+claude   # sign in once, then exit
+```
+
+Hammerspoon and the GitHub CLI (`gh`) are installed by the script if missing.
 
 ### Installation
 
-1. Clone or copy this repo to `~/Projects/worklog`
-
-2. Add this line to `~/.hammerspoon/init.lua`:
-
-```lua
-dofile(os.getenv("HOME") .. "/Projects/worklog/hammerspoon/activity_monitor.lua")
-```
-
-3. Verify the Claude CLI path matches your system:
+1. Clone this repo anywhere you like (the location is detected at runtime):
 
 ```sh
-which claude
+git clone <repo-url> ~/Projects/worklog
+cd ~/Projects/worklog
 ```
 
-If it differs from `~/.local/bin/claude`, update `claude_path` in `hammerspoon/config.lua`.
+2. Run the installer. It is idempotent; re-run it any time.
 
-4. Reload Hammerspoon. You should see a `◉` icon in your menu bar and a "Tracking started" notification.
+```sh
+./install.sh
+```
+
+It will:
+
+- install Hammerspoon and `gh` via Homebrew if they are missing
+- check that `claude` and `gh` are signed in and tell you if not
+- create the gitignored `logs/` and `summaries/` folders
+- write `hammerspoon/config.local.lua` with the absolute paths to `claude` and `gh`
+- create a starter `instructions.local.md` for your personal rules
+- add the loader line to `~/.hammerspoon/init.lua` and reload Hammerspoon
+
+3. Grant Hammerspoon **Accessibility** access when macOS asks (System Settings > Privacy & Security > Accessibility). Without it, window titles come back empty and the log is useless.
+
+4. Look for the `◉` icon in your menu bar and a "Tracking started" notification. After a few minutes, press `Ctrl+Shift+S` to generate a test summary.
+
+To remove the Hammerspoon hook and generated config, run `./uninstall.sh`. It asks before touching `logs/` or `summaries/`.
 
 ## Usage
 
@@ -85,35 +101,60 @@ Use the menu bar "Browse Summaries" option to open a list of all past summaries.
 
 ## Configuration
 
-Edit `hammerspoon/config.lua`:
+Defaults live in `hammerspoon/config.lua` and are checked in. Do not edit that file for personal settings. Put overrides in `hammerspoon/config.local.lua` (gitignored, created by `install.sh`). Any key from the defaults can be overridden there:
 
 ```lua
 return {
-    polling_interval = 30,            -- fallback polling interval in seconds
-    log_hotkey_mods = {"ctrl", "shift"},
-    log_hotkey_key = "L",
-    summary_hotkey_mods = {"ctrl", "shift"},
-    summary_hotkey_key = "S",
-    auto_summary_enabled = true,      -- generate summary automatically
-    auto_summary_time = "17:30",      -- time to auto-generate (24h format)
-    auto_summary_days = {2,3,4,5,6},  -- days of week (1=Sun, 2=Mon, ..., 7=Sat)
-    base_path = os.getenv("HOME") .. "/Projects/worklog",
-    claude_path = os.getenv("HOME") .. "/.local/bin/claude",
+    claude_path = "/opt/homebrew/bin/claude",  -- written by install.sh
+    gh_path = "/opt/homebrew/bin/gh",          -- written by install.sh
+    auto_summary_time = "17:30",
+    auto_summary_days = {2,3,4,5,6},           -- weekdays only
 }
 ```
 
-After editing, reload Hammerspoon for changes to take effect.
+Available keys and their defaults:
+
+| Key | Default | Notes |
+|---|---|---|
+| `polling_interval` | `30` | Fallback polling interval in seconds |
+| `log_hotkey_mods`, `log_hotkey_key` | `{"ctrl","shift"}`, `"L"` | Manual log entry hotkey |
+| `summary_hotkey_mods`, `summary_hotkey_key` | `{"ctrl","shift"}`, `"S"` | Generate today's summary |
+| `auto_summary_enabled` | `true` | Generate summaries automatically |
+| `auto_summary_time` | `"00:00"` | 24h time; at midnight it summarizes the previous day |
+| `auto_summary_days` | `{1,2,3,4,5,6,7}` | 1=Sun ... 7=Sat |
+| `base_path` | repo checkout dir | Detected from the script's own location |
+| `logs_path` | `base_path/logs` | |
+| `summaries_path` | `base_path/summaries` | |
+| `claude_path` | `command -v claude` | Resolved in your login shell at startup if unset |
+| `gh_path` | `command -v gh` | Resolved in your login shell at startup if unset |
+
+Hammerspoon runs with a minimal `PATH`, which is why the CLI paths are baked in as absolute paths rather than left as bare commands.
+
+After editing, reload Hammerspoon (menu bar icon > Reload Config) for changes to take effect. Re-run `./install.sh` after upgrading or moving `claude` or `gh` to refresh the paths.
 
 ## Custom Instructions
 
-Edit `instructions.md` to guide how summaries are generated. For example:
+Two files guide how summaries are generated. Both are merged into every prompt.
+
+- `instructions.md` is checked in and shared. Keep it generic.
+- `instructions.local.md` is gitignored and yours. Put your tools, ticket prefixes, and what to ignore here. Use a `## All` section for every summary level, or `## Daily`, `## Weekly`, `## Monthly`, `## Yearly` for one level. `###` subheaders inside a section are fine.
+
+Example `instructions.local.md`:
 
 ```markdown
-- Ignore Netflix, YouTube, and Spotify activity
-- Group related activities together
-- Highlight context switches between different projects
-- Note time spent in meetings or communication tools
-- Keep the summary concise but capture all meaningful work
+## All
+
+- Ignore Reddit, Netflix, YouTube, and Spotify activity
+
+### Development tools to fold into the active git project/branch
+
+- **Browser on localtest.me** — testing locally, associate with the most recent git branch
+- **DBeaver** — database access, associate with the most recent git project
+- **Loom** — recording PR walkthroughs, associate with the most recent branch/PR
+
+## Weekly
+
+- Call out which days had no commits
 ```
 
 ## Performance Reviews
@@ -186,16 +227,21 @@ for l in open('$HOME/.claude/history.jsonl',errors='ignore'):
 
 ```
 worklog/
+├── install.sh                  # Idempotent setup (deps, dirs, config.local.lua, init.lua hook)
+├── uninstall.sh                # Remove the hook and generated config
 ├── hammerspoon/
-│   ├── activity_monitor.lua    # Main entry point
+│   ├── activity_monitor.lua    # Main entry point; resolves paths, loads config, creates dirs
 │   ├── activity_tracker.lua    # Event-driven window tracking
 │   ├── activity_logger.lua     # Manual log entry webview dialog
 │   ├── activity_summary.lua    # Summary generation and browser
-│   └── config.lua              # All configurable settings
-├── logs/                       # Daily activity logs (YYYY-MM-DD.jsonl)
-├── summaries/                  # Daily, weekly, and monthly summaries
+│   ├── config.lua              # Checked-in defaults
+│   └── config.local.lua        # Per-machine overrides (gitignored, written by install.sh)
+├── prompts/                    # Summary prompt templates (daily, weekly, monthly, yearly)
+├── logs/                       # Daily activity logs (YYYY-MM-DD.jsonl, gitignored)
+├── summaries/                  # daily/, weekly/, monthly/, yearly/ (gitignored)
 ├── reviews/                    # Performance review drafts (gitignored)
-├── instructions.md             # Custom instructions for summaries
+├── instructions.md             # Shared summary instructions (checked in)
+├── instructions.local.md       # Your personal summary instructions (gitignored)
 └── README.md
 ```
 

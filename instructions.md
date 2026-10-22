@@ -1,11 +1,13 @@
 # Custom Instructions for Summary Generation
 
 These instructions are included in every summary prompt (daily, weekly, monthly, yearly).
-Edit this file to control how your summaries are generated.
+This file is checked in and shared. Put anything personal (your tools, ticket prefixes,
+what to ignore) in `instructions.local.md`, which is gitignored and merged on top of this.
 
 ## Filtering
 
-- Ignore Netflix, YouTube, and Spotify activity — this is background music/entertainment
+- Only include activity that looks work related. Software development is work related.
+- Ignore entertainment and background media (streaming, music) unless the user says otherwise
 
 ## Grouping & Organization
 
@@ -15,13 +17,10 @@ Edit this file to control how your summaries are generated.
 
 ## Development Activity Grouping
 
-These tools are part of the development workflow and should be grouped with the most recently active git project/branch:
-
-- **Browser on localtest.me** (e.g. app.localtest.me:3000) — this is testing the app locally, associate it with the most recent git branch
-- **DBeaver** — database access, associate with the most recent git project being worked on
-- **Loom** — recording PR walkthroughs, associate with the most recent git branch/PR
-
-When these tools appear in the log, don't list them as separate activities. Instead, fold them into the project context they belong to (e.g. "Worked on GS1-7168 feature branch — coding, local testing, database queries, and recorded PR walkthrough").
+Supporting tools (local test browsers, database clients, screen recorders) are part of the
+development workflow. Fold them into the git project or branch that was most recently active
+instead of listing them as separate activities. The user's `instructions.local.md` names the
+specific tools.
 
 ## Style
 

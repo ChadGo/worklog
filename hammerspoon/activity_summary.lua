@@ -48,21 +48,26 @@ local function getLocalInstructionsPath()
     return config.base_path .. "/instructions.local.md"
 end
 
--- Parse a section from instructions.local.md by header name
--- Returns content under ## <section> until the next ## or end of file
+-- Parse a section from instructions.local.md by header name.
+-- Returns the lines under "## <section>" up to the next "## " header or EOF.
+-- Line-based so that ### subheaders stay inside their section and an empty
+-- section returns "" instead of leaking the next header.
 local function parseLocalSection(content, section)
     if not content or content == "" then return "" end
-    local pattern = "##%s+" .. section .. "%s*\n(.-)\n##"
-    local match = content:match(pattern)
-    if not match then
-        -- Try matching to end of file (last section)
-        pattern = "##%s+" .. section .. "%s*\n(.+)$"
-        match = content:match(pattern)
+    local inSection = false
+    local lines = {}
+    for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+        local header = line:match("^##%s+(.-)%s*$")
+        local isLevel2 = header ~= nil and not line:match("^###")
+        if isLevel2 then
+            if inSection then break end
+            inSection = (header == section)
+        elseif inSection then
+            lines[#lines + 1] = line
+        end
     end
-    if match then
-        return match:gsub("^%s+", ""):gsub("%s+$", "")
-    end
-    return ""
+    local text = table.concat(lines, "\n")
+    return (text:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
 -- Get combined instructions for a given level (daily, weekly, monthly, yearly)

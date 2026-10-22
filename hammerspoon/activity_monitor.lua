@@ -1,8 +1,51 @@
 -- Worklog for Hammerspoon
 -- Tracks application usage and generates daily summaries
 
-local basePath = os.getenv("HOME") .. "/Projects/worklog"
+-- Resolve the repo root from this file's own location so the checkout can
+-- live anywhere. debug.getinfo gives "@/abs/path/hammerspoon/activity_monitor.lua".
+local scriptPath = debug.getinfo(1, "S").source:gsub("^@", "")
+local basePath = scriptPath:match("^(.*)/hammerspoon/[^/]+$")
+    or (os.getenv("HOME") .. "/Projects/worklog")
+
+-- Load checked-in defaults, then overlay the gitignored per-machine file
+-- that install.sh writes (claude_path, gh_path, and any personal overrides).
 local config = dofile(basePath .. "/hammerspoon/config.lua")
+local localConfigPath = basePath .. "/hammerspoon/config.local.lua"
+local localConfigFile = io.open(localConfigPath, "r")
+if localConfigFile then
+    localConfigFile:close()
+    local ok, overrides = pcall(dofile, localConfigPath)
+    if ok and type(overrides) == "table" then
+        for k, v in pairs(overrides) do config[k] = v end
+    else
+        hs.notify.new({title = "Worklog", informativeText = "config.local.lua failed to load: " .. tostring(overrides)}):send()
+    end
+end
+
+config.base_path = config.base_path or basePath
+
+-- Hammerspoon's own PATH is minimal, so a bare "claude" or "gh" usually will
+-- not resolve. Fall back to the user's login shell to find the binary.
+local function resolveCommand(name)
+    local out, ok = hs.execute("command -v " .. name, true)
+    if ok and out and out ~= "" then
+        return (out:gsub("%s+$", ""))
+    end
+    return name
+end
+config.claude_path = config.claude_path or resolveCommand("claude")
+config.gh_path = config.gh_path or resolveCommand("gh")
+
+-- Writes use io.open(path, "a"), which silently fails if the directory is
+-- missing. logs/ and summaries/ are gitignored, so create them up front.
+local function ensureDir(dir)
+    hs.execute(string.format("mkdir -p '%s'", dir))
+end
+ensureDir(config.logs_path or (config.base_path .. "/logs"))
+local summariesDir = config.summaries_path or (config.base_path .. "/summaries")
+for _, level in ipairs({"daily", "weekly", "monthly", "yearly"}) do
+    ensureDir(summariesDir .. "/" .. level)
+end
 
 local tracker = dofile(basePath .. "/hammerspoon/activity_tracker.lua")
 local logger = dofile(basePath .. "/hammerspoon/activity_logger.lua")
@@ -86,7 +129,7 @@ local function buildMenu()
         {
             title = "📂 Open Logs",
             fn = function()
-                hs.execute("open '" .. config.base_path .. "/logs'")
+                hs.execute("open '" .. (config.logs_path or (config.base_path .. "/logs")) .. "'")
             end
         },
         { title = "-" },
