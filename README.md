@@ -94,10 +94,30 @@ Summaries are saved to `summaries/YYYY-MM-DD.md` and include:
 - **Activity breakdown** — grouped by project with time ranges
 - **Commits** — git commits from all active repos that day
 - **PR activity** — GitHub PRs authored or reviewed
+- **Slack and Zoom detail** — business conversations from Slack channels and Zoom meeting notes, folded into the matching activities
+
+### Slack and Zoom
+
+Before each daily summary, Worklog runs Claude headless with read-only Slack and Zoom tools to gather that day's business conversations. The result is saved to `summaries/context/YYYY-MM-DD.md` and added to the summary prompt.
+
+- **Slack:** messages you sent, thread replies, and threads you were mentioned in, from public and private channels only. Direct messages and group DMs are skipped.
+- **Zoom:** meetings you attended, with the AI Companion summary or your notes when they exist. Without either, only the title and time are listed.
+- **Meeting time:** Zoom's meeting times override the activity log. The tracker only sees the window in front, so a call where you had other windows open would otherwise be credited to those apps. Each meeting's full span is counted as `Meeting: <title>` in the time breakdown (daily and weekly), and that time is taken out of the other rows.
+- **Business only:** personal or social conversations are dropped. Your `instructions.md` and `instructions.local.md` rules apply here too.
+- **Read only:** the run can search and read, and every send, post, react, edit, or create tool is blocked.
+
+Requirements:
+
+1. Connect the **Slack** and **Zoom** connectors in claude.ai (Settings > Connectors). Worklog uses the claude.ai connectors, not the Slack plugin.
+2. Do not also install the Slack Claude Code plugin. When both are present, headless runs suppress both and Slack drops out.
+
+A finished day's collection is reused. To refetch a day, delete its file in `summaries/context/` and regenerate. If a source is unavailable, the summary ends with a one-line note saying so. Set `comms_enabled = false` in `config.local.lua` to turn this off.
+
+**Troubleshooting:** if Slack shows as unavailable even though the connector is connected, Claude Code may have cached it as needing sign-in. Remove the `"claude.ai Slack"` entry from `~/.claude/mcp-needs-auth-cache.json`, or run `/mcp` in an interactive Claude Code session and authenticate it.
 
 ### Summary Browser
 
-Use the menu bar "Browse Summaries" option to open a list of all past summaries. Click any entry to open it.
+Use the menu bar "Browse Summaries" option to open the summary folders (Daily, Weekly, Monthly, Yearly). Each folder lists its summaries newest first. Click a folder to expand it, and click any entry to open it.
 
 ## Configuration
 
@@ -127,6 +147,8 @@ Available keys and their defaults:
 | `summaries_path` | `base_path/summaries` | |
 | `claude_path` | `command -v claude` | Resolved in your login shell at startup if unset |
 | `gh_path` | `command -v gh` | Resolved in your login shell at startup if unset |
+| `comms_enabled` | `true` | Add Slack channel conversations and Zoom meeting notes to daily summaries |
+| `comms_timeout` | `300` | Seconds before the Slack and Zoom collection gives up |
 
 Hammerspoon runs with a minimal `PATH`, which is why the CLI paths are baked in as absolute paths rather than left as bare commands.
 
@@ -236,9 +258,9 @@ worklog/
 │   ├── activity_summary.lua    # Summary generation and browser
 │   ├── config.lua              # Checked-in defaults
 │   └── config.local.lua        # Per-machine overrides (gitignored, written by install.sh)
-├── prompts/                    # Summary prompt templates (daily, weekly, monthly, yearly)
+├── prompts/                    # Prompt templates (daily, weekly, monthly, yearly, comms for Slack and Zoom)
 ├── logs/                       # Daily activity logs (YYYY-MM-DD.jsonl, gitignored)
-├── summaries/                  # daily/, weekly/, monthly/, yearly/ (gitignored)
+├── summaries/                  # daily/, weekly/, monthly/, yearly/, context/ for Slack and Zoom (gitignored)
 ├── reviews/                    # Performance review drafts (gitignored)
 ├── instructions.md             # Shared summary instructions (checked in)
 ├── instructions.local.md       # Your personal summary instructions (gitignored)

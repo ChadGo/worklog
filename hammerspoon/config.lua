@@ -22,4 +22,6 @@ return {
     summaries_path = nil,  -- defaults to base_path/summaries
     claude_path = nil,     -- path to the claude CLI; defaults to `command -v claude` in your login shell
     gh_path = nil,         -- path to the gh CLI; defaults to `command -v gh` in your login shell
+    comms_enabled = true,  -- add Slack channel conversations and Zoom meeting notes to daily summaries
+    comms_timeout = 300,   -- seconds before the Slack and Zoom collection gives up
 }

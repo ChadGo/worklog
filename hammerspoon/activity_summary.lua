@@ -171,8 +171,63 @@ end
 
 -- Calculate time spent per project from a JSONL log string
 -- Returns a sorted list of {project, seconds}, total tracked seconds, and total active seconds
-local function calculateProjectTime(logContent)
+local function getCommsPath(date)
+    return getSummariesDir() .. "/context/" .. date .. ".md"
+end
+
+-- Read meetings from the "## Zoom" section of a Slack and Zoom collection.
+-- Headings look like "### Eng Roundtable (09:42 to 11:02)" in local 24h time.
+-- Returns a sorted list of non-overlapping {name, start, finish} in seconds.
+local function parseMeetings(commsContent)
+    local meetings = {}
+    if not commsContent or commsContent == "" then return meetings end
+
+    local inZoom = false
+    for line in (commsContent .. "\n"):gmatch("([^\n]*)\n") do
+        if line:match("^##%s") and not line:match("^###") then
+            inZoom = line:match("^##%s+Zoom") ~= nil
+        elseif inZoom then
+            local name, h1, m1, h2, m2 = line:match("^###%s+(.-)%s*%((%d%d?):(%d%d)%s*%S+%s*(%d%d?):(%d%d)%)%s*$")
+            if name then
+                local start = tonumber(h1) * 3600 + tonumber(m1) * 60
+                local finish = tonumber(h2) * 3600 + tonumber(m2) * 60
+                if finish > start then
+                    table.insert(meetings, {name = name, start = start, finish = finish})
+                end
+            end
+        end
+    end
+
+    -- Clip overlaps so no second is counted twice.
+    table.sort(meetings, function(a, b) return a.start < b.start end)
+    local lastEnd = 0
+    local clipped = {}
+    for _, m in ipairs(meetings) do
+        if m.start < lastEnd then m.start = lastEnd end
+        if m.finish > m.start then
+            table.insert(clipped, m)
+            lastEnd = m.finish
+        end
+    end
+    return clipped
+end
+
+local function meetingOverlap(meetings, from, to)
+    local total = 0
+    for _, m in ipairs(meetings) do
+        local o = math.min(to, m.finish) - math.max(from, m.start)
+        if o > 0 then total = total + o end
+    end
+    return total
+end
+
+-- Time per project from the activity log. Meetings (from Zoom) take priority:
+-- a meeting's whole span counts as meeting time, including idle stretches and
+-- time when another window was in front, and that time is removed from
+-- whatever app was frontmost.
+local function calculateProjectTime(logContent, meetings)
     if not logContent or logContent == "" then return {}, 0, 0 end
+    meetings = meetings or {}
 
     local entries = {}
     local inIdle = false
@@ -238,6 +293,11 @@ local function calculateProjectTime(logContent)
             gap = 0
         end
 
+        -- Time inside a meeting belongs to the meeting, not the frontmost app.
+        if gap > 0 and #meetings > 0 then
+            gap = gap - meetingOverlap(meetings, cur.time, cur.time + gap)
+        end
+
         totalActive = totalActive + gap
 
         if cur.project then
@@ -246,6 +306,14 @@ local function calculateProjectTime(logContent)
         end
 
         ::nextentry::
+    end
+
+    for _, m in ipairs(meetings) do
+        local key = "Meeting: " .. m.name
+        local dur = m.finish - m.start
+        projectTime[key] = (projectTime[key] or 0) + dur
+        totalTracked = totalTracked + dur
+        totalActive = totalActive + dur
     end
 
     -- Sort by time descending
@@ -283,7 +351,8 @@ local function aggregateProjectTime(dates)
         local logPath = getLogPath(date)
         local logContent = readFile(logPath)
         if logContent and logContent ~= "" then
-            local projectTimes, totalTracked, totalActive = calculateProjectTime(logContent)
+            local meetings = parseMeetings(readFile(getCommsPath(date)))
+            local projectTimes, totalTracked, totalActive = calculateProjectTime(logContent, meetings)
             grandTotal = grandTotal + totalTracked
             grandActive = grandActive + totalActive
             for _, pt in ipairs(projectTimes) do
@@ -381,8 +450,9 @@ local function ensureDir(dir)
     hs.execute(string.format("mkdir -p '%s'", dir))
 end
 
--- Run a prompt through Claude CLI async, writing result to outputPath
-local function runClaude(prompt, outputPath, label)
+-- Run a prompt through Claude CLI async, writing result to outputPath.
+-- onDone (optional) is called once the run finishes, whether it succeeded or not.
+local function runClaude(prompt, outputPath, label, onDone)
     hs.notify.new({
         title = "Worklog",
         informativeText = "Generating " .. label .. "..."
@@ -413,6 +483,132 @@ local function runClaude(prompt, outputPath, label)
                 title = "Worklog",
                 informativeText = label .. " failed: " .. errMsg:sub(1, 100)
             }):send()
+        end
+        if onDone then onDone() end
+    end, {"-c", cmd}):start()
+end
+
+-- Slack and Zoom collection ------------------------------------------------
+--
+-- Runs Claude headless with read-only Slack and Zoom connector tools to gather
+-- the day's business conversations from Slack channels and Zoom meeting notes.
+-- The result is saved to summaries/context/<date>.md and fed into the daily
+-- summary prompt. Any failure is non-fatal: the summary runs without it.
+
+local COMMS_ALLOWED_TOOLS = {
+    "ToolSearch",
+    "mcp__claude_ai_Slack__slack_search_public_and_private",
+    "mcp__claude_ai_Slack__slack_search_public",
+    "mcp__claude_ai_Slack__slack_search_channels",
+    "mcp__claude_ai_Slack__slack_search_users",
+    "mcp__claude_ai_Slack__slack_read_thread",
+    "mcp__claude_ai_Slack__slack_read_channel",
+    "mcp__claude_ai_Slack__slack_read_user_profile",
+    "mcp__claude_ai_Zoom_for_Claude__search",
+    "mcp__claude_ai_Zoom_for_Claude__search_describe_capabilities",
+    "mcp__claude_ai_Zoom_for_Claude__search_meetings",
+    "mcp__claude_ai_Zoom_for_Claude__get_meeting_assets",
+    "mcp__claude_ai_Zoom_for_Claude__my_notes_get_note_content",
+    "mcp__claude_ai_Zoom_for_Claude__recordings_list",
+}
+
+-- Belt and braces: nothing outside the allow list runs in --print mode, but
+-- deny anything that writes in case a user-level rule ever allows it.
+local COMMS_DISALLOWED_TOOLS = {
+    "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent",
+    "mcp__claude_ai_Slack__slack_send_message",
+    "mcp__claude_ai_Slack__slack_send_message_draft",
+    "mcp__claude_ai_Slack__slack_schedule_message",
+    "mcp__claude_ai_Slack__slack_add_reaction",
+    "mcp__claude_ai_Slack__slack_create_canvas",
+    "mcp__claude_ai_Slack__slack_update_canvas",
+    "mcp__claude_ai_Slack__slack_create_conversation",
+    "mcp__claude_ai_Slack__slack_create_list",
+    "mcp__claude_ai_Slack__slack_update_list",
+    "mcp__claude_ai_Slack__slack_add_list_record",
+    "mcp__claude_ai_Slack__slack_update_list_record",
+    "mcp__claude_ai_Slack__slack_get_file_upload_url",
+    "mcp__claude_ai_Slack__slack_complete_file_upload",
+    "mcp__claude_ai_Zoom_for_Claude__meeting_create",
+    "mcp__claude_ai_Zoom_for_Claude__meeting_update",
+    "mcp__claude_ai_Zoom_for_Claude__meeting_delete",
+    "mcp__claude_ai_Zoom_for_Claude__in_meeting_control",
+    "mcp__claude_ai_Zoom_for_Claude__capabilities_invoke_write",
+    "mcp__claude_ai_Zoom_for_Claude__create_new_file_with_markdown",
+    "mcp__claude_ai_Zoom_for_Claude__hub_create_file_from_content",
+    "mcp__claude_ai_Zoom_for_Claude__canvas_add_file_collaborators",
+    "mcp__claude_ai_Zoom_for_Claude__canvas_modify_file_collaborator_role",
+    "mcp__claude_ai_Zoom_for_Claude__canvas_remove_file_collaborator",
+}
+
+local function shellQuote(str)
+    return "'" .. tostring(str):gsub("'", "'\\''") .. "'"
+end
+
+-- callback(markdown) on success, callback(nil, reason) otherwise.
+local function collectComms(date, instructions, callback)
+    if config.comms_enabled == false then
+        callback(nil, "disabled")
+        return
+    end
+
+    local path = getCommsPath(date)
+
+    -- A finished day does not change, so reuse a complete collection. Today is
+    -- still in progress, and a collection with an unavailable source is retried.
+    if date < os.date("%Y-%m-%d") then
+        local cached = readFile(path)
+        if cached and cached ~= "" and not cached:find("UNAVAILABLE:", 1, true) then
+            callback(cached)
+            return
+        end
+    end
+
+    local prompt = loadPrompt("comms", {
+        date = date,
+        tz_offset = os.date("%z"),
+        instructions = instructions ~= "" and ("## The user's summary instructions\n\nApply these when deciding what is relevant.\n\n" .. instructions) or "",
+    })
+    if not prompt then
+        callback(nil, "missing prompts/comms.md")
+        return
+    end
+
+    hs.notify.new({title = "Worklog", informativeText = "Collecting Slack and Zoom for " .. date .. "..."}):send()
+
+    local dir = path:match("(.+)/")
+    ensureDir(dir)
+    local tmpPath = os.tmpname()
+    writeFile(tmpPath, prompt)
+
+    local claudePath = config.claude_path or "claude"
+    local timeout = tonumber(config.comms_timeout) or 300
+    -- Run from the context folder so no project settings or CLAUDE.md load.
+    -- perl's alarm caps the run so a hung connector cannot stall the summary.
+    local cmd = string.format(
+        "cd %s && perl -e 'alarm shift; exec @ARGV' %d %s --print --allowedTools %s --disallowedTools %s < %s; rc=$?; rm -f %s; exit $rc",
+        shellQuote(dir), timeout, shellQuote(claudePath),
+        shellQuote(table.concat(COMMS_ALLOWED_TOOLS, ",")),
+        shellQuote(table.concat(COMMS_DISALLOWED_TOOLS, ",")),
+        shellQuote(tmpPath), shellQuote(tmpPath)
+    )
+
+    hs.task.new("/bin/zsh", function(exitCode, stdOut, stdErr)
+        local out = stdOut or ""
+        local startAt = out:find("# Communications", 1, true)
+        if exitCode == 0 and startAt then
+            local content = out:sub(startAt)
+            writeFile(path, content)
+            callback(content)
+        else
+            local reason = exitCode == 142 and ("timed out after " .. timeout .. "s")
+                or ((stdErr ~= "" and stdErr) or out):gsub("%s+", " "):sub(1, 150)
+            if reason == "" then reason = "exit code " .. tostring(exitCode) end
+            -- Keep the details next to the context file for troubleshooting.
+            writeFile(path:gsub("%.md$", ".error.txt"), string.format(
+                "exit code: %s\nreason: %s\n\n--- stderr ---\n%s\n\n--- stdout ---\n%s\n",
+                tostring(exitCode), reason, stdErr or "", out))
+            callback(nil, reason)
         end
     end, {"-c", cmd}):start()
 end
@@ -474,8 +670,16 @@ local function getYearMonths(year)
     return months
 end
 
-function M.generate(date)
+-- Exposed so the collection can be run on its own for troubleshooting.
+function M.collectComms(date, callback)
+    collectComms(date, getInstructions("daily"), callback or function() end)
+end
+
+function M.generate(date, onDone)
     date = date or os.date("%Y-%m-%d")
+    local function finish()
+        if onDone then onDone() end
+    end
     local logPath = getLogPath(date)
     local logContent = readFile(logPath)
 
@@ -484,15 +688,12 @@ function M.generate(date)
             title = "Worklog",
             informativeText = "No activity log found for " .. date
         }):send()
+        finish()
         return
     end
 
     local instructions = getInstructions("daily")
     local instructionsBlock = instructions ~= "" and ("## Custom Instructions\n\n" .. instructions) or ""
-
-    local projectTimes, totalTracked, totalActive = calculateProjectTime(logContent)
-    local timeBreakdown = formatProjectTime(projectTimes, totalTracked, totalActive)
-    local timeBlock = timeBreakdown ~= "" and ("## Time Breakdown\n\n" .. timeBreakdown .. "\nUse this data for the time breakdown in the summary. These are calculated from the log timestamps.") or ""
 
     local repos = parseRepos(logContent)
 
@@ -502,21 +703,48 @@ function M.generate(date)
     local prActivity = getPRActivity(repos, date)
     local prBlock = prActivity ~= "" and ("## GitHub PR Activity Today\n\n" .. prActivity .. "\nInclude PR activity in the summary — PRs opened, updated, reviewed, or merged.") or "## GitHub PR Activity Today\n\nNo PR activity found."
 
-    local prompt = loadPrompt("daily", {
-        instructions = instructionsBlock,
-        log = logContent,
-        time_breakdown = timeBlock,
-        git_commits = commitsBlock,
-        pr_activity = prBlock,
-        date = date,
-    })
+    collectComms(date, instructions, function(comms, reason)
+        local meetings = parseMeetings(comms)
+        local projectTimes, totalTracked, totalActive = calculateProjectTime(logContent, meetings)
+        local timeBreakdown = formatProjectTime(projectTimes, totalTracked, totalActive)
+        local timeBlock = ""
+        if timeBreakdown ~= "" then
+            timeBlock = "## Time Breakdown\n\n" .. timeBreakdown
+                .. "\nUse this data for the time breakdown in the summary. These are calculated from the log timestamps."
+            if #meetings > 0 then
+                timeBlock = timeBlock .. " \"Meeting:\" rows use the real meeting times from Zoom. Each meeting's full span counts as meeting time, even when another window was in front, and that time has been removed from the other rows."
+            end
+        end
 
-    if not prompt then
-        hs.notify.new({title = "Worklog", informativeText = "Missing prompt template: prompts/daily.md"}):send()
-        return
-    end
+        local commsBlock = ""
+        if comms then
+            commsBlock = "## Slack and Zoom\n\n"
+                .. "Business conversations from Slack channels (no direct messages) and Zoom meeting notes for this day, already filtered to work topics.\n"
+                .. "Use them to add detail to the matching activities. If a source below says UNAVAILABLE, end the summary with a one-line note saying that source was unavailable.\n\n"
+                .. comms
+        elseif reason ~= "disabled" then
+            commsBlock = "## Slack and Zoom\n\nSlack and Zoom could not be collected for this day (" .. reason .. "). "
+                .. "End the summary with a one-line note saying Slack and Zoom were unavailable."
+        end
 
-    runClaude(prompt, getSummaryPath(date), "Summary for " .. date)
+        local prompt = loadPrompt("daily", {
+            instructions = instructionsBlock,
+            log = logContent,
+            time_breakdown = timeBlock,
+            git_commits = commitsBlock,
+            pr_activity = prBlock,
+            comms = commsBlock,
+            date = date,
+        })
+
+        if not prompt then
+            hs.notify.new({title = "Worklog", informativeText = "Missing prompt template: prompts/daily.md"}):send()
+            finish()
+            return
+        end
+
+        runClaude(prompt, getSummaryPath(date), "Summary for " .. date, finish)
+    end)
 end
 
 function M.generateWeekly(date)
@@ -749,26 +977,32 @@ local function runScheduledSummaries()
     local summaryDate, summaryTime = scheduledSummaryDate(now)
     local st = os.date("*t", summaryTime)
 
+    -- Weekly and monthly read the daily summaries, so they start only after
+    -- the daily summary (including Slack and Zoom collection) has finished.
+    local function runRollups()
+        -- Weekly: when the summarized day is a Friday
+        if st.wday == 6 then
+            local _, weekLabel = getWeekDates(summaryDate)
+            if not fileExists(getSummariesDir() .. "/weekly/" .. weekLabel .. ".md") then
+                M.generateWeekly(summaryDate)
+            end
+        end
+
+        -- Monthly: when the summarized day is the last day of its month
+        local nextDayMonth = tonumber(os.date("%m", summaryTime + 86400))
+        if nextDayMonth ~= st.month then
+            local yearMonth = os.date("%Y-%m", summaryTime)
+            if not fileExists(getSummariesDir() .. "/monthly/" .. yearMonth .. ".md") then
+                hs.timer.doAfter(60, function() M.generateMonthly(yearMonth) end)
+            end
+        end
+    end
+
     -- Daily
     if fileExists(getLogPath(summaryDate)) and not fileExists(getSummaryPath(summaryDate)) then
-        M.generate(summaryDate)
-    end
-
-    -- Weekly: when the summarized day is a Friday
-    if st.wday == 6 then
-        local _, weekLabel = getWeekDates(summaryDate)
-        if not fileExists(getSummariesDir() .. "/weekly/" .. weekLabel .. ".md") then
-            hs.timer.doAfter(120, function() M.generateWeekly(summaryDate) end)
-        end
-    end
-
-    -- Monthly: when the summarized day is the last day of its month
-    local nextDayMonth = tonumber(os.date("%m", summaryTime + 86400))
-    if nextDayMonth ~= st.month then
-        local yearMonth = os.date("%Y-%m", summaryTime)
-        if not fileExists(getSummariesDir() .. "/monthly/" .. yearMonth .. ".md") then
-            hs.timer.doAfter(180, function() M.generateMonthly(yearMonth) end)
-        end
+        M.generate(summaryDate, runRollups)
+    else
+        runRollups()
     end
 end
 
@@ -825,6 +1059,8 @@ end
 
 -- Summary browser webview
 local browserWebview = nil
+-- Which folders are expanded; kept across opens until Hammerspoon reloads.
+local browserOpenFolders = nil
 
 function M.showBrowser()
     if browserWebview then
@@ -834,7 +1070,6 @@ function M.showBrowser()
 
     local summariesDir = getSummariesDir()
 
-    -- Scan all subdirectories for summary files
     local categories = {
         {dir = "daily",   label = "Daily"},
         {dir = "weekly",  label = "Weekly"},
@@ -842,49 +1077,81 @@ function M.showBrowser()
         {dir = "yearly",  label = "Yearly"},
     }
 
-    local files = {}
+    local function escapeHtml(s)
+        return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;"):gsub("'", "&#39;"))
+    end
+
+    local function firstPreviewLine(content)
+        local lineCount = 0
+        for line in content:gmatch("[^\n]+") do
+            if lineCount > 0 and line ~= "" and not line:match("^#") then
+                return line:sub(1, 120)
+            end
+            lineCount = lineCount + 1
+        end
+        return ""
+    end
+
+    -- One folder per summary level, each sorted newest first. File names are
+    -- ISO dates (YYYY, YYYY-MM, YYYY-MM-DD), so a reverse string sort is a
+    -- reverse chronological sort.
+    local folders = {}
+    local total = 0
     for _, cat in ipairs(categories) do
         local dirPath = summariesDir .. "/" .. cat.dir
-        local output, status = hs.execute(string.format("ls -1r '%s'/*.md 2>/dev/null", dirPath))
+        local files = {}
+        local output, status = hs.execute(string.format("ls -1 '%s'/*.md 2>/dev/null", dirPath))
         if status and output and output ~= "" then
             for path in output:gmatch("[^\n]+") do
-                local filename = path:match("([^/]+)$")
-                local name = filename:match("^(.+)%.md$")
+                local name = path:match("([^/]+)%.md$")
                 if name then
-                    local content = readFile(path) or ""
-                    local preview = ""
-                    local lineCount = 0
-                    for line in content:gmatch("[^\n]+") do
-                        if lineCount > 0 and line ~= "" and not line:match("^#") then
-                            preview = line:sub(1, 120)
-                            break
-                        end
-                        lineCount = lineCount + 1
-                    end
-                    table.insert(files, {
-                        date = name,
-                        path = path,
-                        preview = preview,
-                        label = cat.label,
-                    })
+                    table.insert(files, {name = name, path = path})
                 end
             end
         end
+        table.sort(files, function(a, b) return a.name > b.name end)
+        for _, f in ipairs(files) do
+            f.preview = firstPreviewLine(readFile(f.path) or "")
+        end
+        total = total + #files
+        table.insert(folders, {dir = cat.dir, label = cat.label, files = files})
     end
+
+    -- Folders start collapsed so every level is visible at a glance.
+    browserOpenFolders = browserOpenFolders or {}
 
     -- Build HTML
     local items = ""
-    if #files == 0 then
+    if total == 0 then
         items = '<div class="empty">No summaries yet</div>'
     else
-        for _, f in ipairs(files) do
-            local escaped_preview = f.preview:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+        for _, folder in ipairs(folders) do
+            local isOpen = browserOpenFolders[folder.dir] and #folder.files > 0
+            local latest = folder.files[1] and ("latest " .. folder.files[1].name) or "empty"
+            local rows = ""
+            for _, f in ipairs(folder.files) do
+                rows = rows .. string.format(
+                    '<a class="item" href="#" data-path="%s">'
+                    .. '<div class="date">%s</div>'
+                    .. '<div class="preview">%s</div>'
+                    .. '</a>',
+                    escapeHtml(f.path), escapeHtml(f.name), escapeHtml(f.preview)
+                )
+            end
             items = items .. string.format(
-                '<a class="item" href="#" onclick="openFile(\'%s\'); return false;">'
-                .. '<div class="date"><span class="label">%s</span> %s</div>'
-                .. '<div class="preview">%s</div>'
-                .. '</a>',
-                f.path, f.label, f.date, escaped_preview
+                '<div class="folder%s%s" data-dir="%s">'
+                .. '<div class="folder-head">'
+                .. '<span class="chevron">▸</span>'
+                .. '<span class="folder-icon">📁</span>'
+                .. '<span class="folder-name">%s</span>'
+                .. '<span class="count">%d</span>'
+                .. '<span class="latest">%s</span>'
+                .. '</div>'
+                .. '<div class="folder-body">%s</div>'
+                .. '</div>',
+                isOpen and " open" or "",
+                #folder.files == 0 and " empty-folder" or "",
+                folder.dir, folder.label, #folder.files, escapeHtml(latest), rows
             )
         end
     end
@@ -895,29 +1162,51 @@ function M.showBrowser()
 <head>
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
         background: #1e1e1e;
         color: #cccccc;
         padding: 16px;
         -webkit-user-select: none;
+        display: flex;
+        flex-direction: column;
     }
     h2 { font-size: 14px; font-weight: 600; color: #ffffff; margin-bottom: 12px; }
-    .list { overflow-y: auto; max-height: 350px; }
+    .list { overflow-y: auto; flex: 1; }
+    .folder { margin-bottom: 6px; }
+    .folder-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        background: #252526;
+        border: 1px solid #333;
+    }
+    .folder-head:hover { border-color: #007acc; }
+    .chevron { font-size: 11px; color: #888; width: 10px; transition: transform 0.15s; }
+    .folder.open .chevron { transform: rotate(90deg); }
+    .folder-name { font-size: 14px; font-weight: 600; color: #ffffff; }
+    .count { font-size: 11px; background: #333; color: #aaa; padding: 1px 7px; border-radius: 10px; }
+    .latest { font-size: 11px; color: #777; margin-left: auto; }
+    .empty-folder .folder-head { opacity: 0.5; cursor: default; }
+    .folder-body { display: none; padding: 6px 0 2px 20px; }
+    .folder.open .folder-body { display: block; }
     .item {
         display: block;
-        padding: 10px 12px;
+        padding: 8px 12px;
         border-radius: 6px;
         text-decoration: none;
         color: #cccccc;
         border: 1px solid #333;
-        margin-bottom: 6px;
+        margin-bottom: 4px;
         cursor: pointer;
     }
     .item:hover { background: #2d2d2d; border-color: #007acc; }
-    .date { font-size: 14px; font-weight: 600; color: #ffffff; }
-    .preview { font-size: 12px; color: #888; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .label { font-size: 11px; background: #333; color: #aaa; padding: 2px 6px; border-radius: 3px; margin-right: 6px; }
+    .date { font-size: 13px; font-weight: 600; color: #ffffff; }
+    .preview { font-size: 12px; color: #888; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .empty { color: #666; font-size: 13px; padding: 20px 0; text-align: center; }
 </style>
 </head>
@@ -925,13 +1214,24 @@ function M.showBrowser()
     <h2>Summaries</h2>
     <div class="list">]] .. items .. [[</div>
     <script>
-        function openFile(path) {
-            window.webkit.messageHandlers.hammerspoon.postMessage("open:" + path);
+        function post(msg) {
+            window.webkit.messageHandlers.hammerspoon.postMessage(msg);
         }
+        document.querySelectorAll(".folder").forEach(function(folder) {
+            if (folder.classList.contains("empty-folder")) return;
+            folder.querySelector(".folder-head").addEventListener("click", function() {
+                var open = folder.classList.toggle("open");
+                post("toggle:" + folder.dataset.dir + ":" + (open ? "1" : "0"));
+            });
+        });
+        document.querySelectorAll(".item").forEach(function(item) {
+            item.addEventListener("click", function(e) {
+                e.preventDefault();
+                post("open:" + item.dataset.path);
+            });
+        });
         document.addEventListener("keydown", function(e) {
-            if (e.key === "Escape") {
-                window.webkit.messageHandlers.hammerspoon.postMessage("close");
-            }
+            if (e.key === "Escape") post("close");
         });
     </script>
 </body>
@@ -940,7 +1240,7 @@ function M.showBrowser()
 
     local screen = hs.screen.mainScreen():frame()
     local width = 500
-    local height = 450
+    local height = 520
     local rect = hs.geometry.rect(
         (screen.w - width) / 2,
         (screen.h - height) / 2,
@@ -951,12 +1251,18 @@ function M.showBrowser()
     local uc = hs.webview.usercontent.new("hammerspoon")
     uc:setCallback(function(msg)
         local body = msg.body
-        if type(body) == "string" and body:sub(1, 5) == "open:" then
+        if type(body) ~= "string" then return end
+        if body:sub(1, 5) == "open:" then
             local path = body:sub(6)
-            hs.execute("open '" .. path .. "'")
+            hs.execute("open " .. string.format("%q", path))
             if browserWebview then
                 browserWebview:delete()
                 browserWebview = nil
+            end
+        elseif body:sub(1, 7) == "toggle:" then
+            local dir, state = body:match("^toggle:([%w_]+):([01])$")
+            if dir then
+                browserOpenFolders[dir] = (state == "1") or nil
             end
         elseif body == "close" then
             if browserWebview then

@@ -8,6 +8,8 @@ what to ignore) in `instructions.local.md`, which is gitignored and merged on to
 
 - Only include activity that looks work related. Software development is work related.
 - Ignore entertainment and background media (streaming, music) unless the user says otherwise
+- Keep summaries business focused. Leave out anything that looks like a personal or social
+  conversation, including in Slack channels and Zoom meetings
 
 ## Grouping & Organization
 
