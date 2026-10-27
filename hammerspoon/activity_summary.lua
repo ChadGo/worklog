@@ -462,15 +462,22 @@ local function runClaude(prompt, outputPath, label, onDone)
     writeFile(tmpPath, prompt)
 
     local claudePath = config.claude_path or "claude"
+    -- caffeinate -i keeps the Mac from idle-sleeping mid-run. If it sleeps
+    -- anyway (lid closed), the CLI prints an error and still exits 0.
     local cmd = string.format(
-        "cat '%s' | '%s' --print 2>&1; rm -f '%s'",
+        "cat '%s' | /usr/bin/caffeinate -i '%s' --print 2>&1; rm -f '%s'",
         tmpPath, claudePath, tmpPath
     )
 
     hs.task.new("/bin/zsh", function(exitCode, stdOut, stdErr)
-        if exitCode == 0 and stdOut and stdOut ~= "" then
+        -- Only a markdown document counts as a summary. Anything else (such as
+        -- "API Error: Your computer went to sleep mid-response") is a failure,
+        -- so no file is written and the next catch-up retries it.
+        local out = stdOut or ""
+        local startAt = out:find("^#") or out:find("\n#")
+        if exitCode == 0 and startAt then
             ensureDir(outputPath:match("(.+)/"))
-            writeFile(outputPath, stdOut)
+            writeFile(outputPath, (out:sub(startAt):gsub("^\n", "")))
             hs.notify.new({
                 title = "Worklog",
                 informativeText = label .. " saved",
@@ -478,7 +485,7 @@ local function runClaude(prompt, outputPath, label, onDone)
                 hasActionButton = true,
             }):send()
         else
-            local errMsg = stdErr or stdOut or "Unknown error"
+            local errMsg = (stdErr ~= "" and stdErr) or (out ~= "" and out) or "Unknown error"
             hs.notify.new({
                 title = "Worklog",
                 informativeText = label .. " failed: " .. errMsg:sub(1, 100)
@@ -586,7 +593,7 @@ local function collectComms(date, instructions, callback)
     -- Run from the context folder so no project settings or CLAUDE.md load.
     -- perl's alarm caps the run so a hung connector cannot stall the summary.
     local cmd = string.format(
-        "cd %s && perl -e 'alarm shift; exec @ARGV' %d %s --print --allowedTools %s --disallowedTools %s < %s; rc=$?; rm -f %s; exit $rc",
+        "cd %s && /usr/bin/caffeinate -i perl -e 'alarm shift; exec @ARGV' %d %s --print --allowedTools %s --disallowedTools %s < %s; rc=$?; rm -f %s; exit $rc",
         shellQuote(dir), timeout, shellQuote(claudePath),
         shellQuote(table.concat(COMMS_ALLOWED_TOOLS, ",")),
         shellQuote(table.concat(COMMS_DISALLOWED_TOOLS, ",")),
@@ -972,7 +979,8 @@ end
 -- Generate whatever the scheduled run should have produced and hasn't yet.
 -- Uses file existence as the guard, so it is safe to call after a missed run
 -- (machine asleep at the scheduled time) without duplicating work.
-local function runScheduledSummaries()
+local function runScheduledSummaries(onDone)
+    onDone = onDone or function() end
     local now = os.date("*t")
     local summaryDate, summaryTime = scheduledSummaryDate(now)
     local st = os.date("*t", summaryTime)
@@ -996,11 +1004,16 @@ local function runScheduledSummaries()
                 hs.timer.doAfter(60, function() M.generateMonthly(yearMonth) end)
             end
         end
+        onDone()
     end
 
     -- Daily
     if fileExists(getLogPath(summaryDate)) and not fileExists(getSummaryPath(summaryDate)) then
-        M.generate(summaryDate, runRollups)
+        -- If the daily summary failed, hold the rollups so they do not run
+        -- without it; the next catch-up retries both.
+        M.generate(summaryDate, function()
+            if fileExists(getSummaryPath(summaryDate)) then runRollups() else onDone() end
+        end)
     else
         runRollups()
     end
@@ -1014,10 +1027,11 @@ function M.startAutoSummary()
     -- "At or after" (rather than exact-minute match) means a run missed while
     -- the machine was asleep happens as soon as it is awake again.
     local ran = {}
+    local running = false
     local function check()
         local now = os.date("*t")
         local today = os.date("%Y-%m-%d")
-        if ran[today] then return end
+        if ran[today] or running then return end
 
         local dayEnabled = false
         for _, d in ipairs(config.auto_summary_days or {}) do
@@ -1029,7 +1043,8 @@ function M.startAutoSummary()
         if timeStr < (config.auto_summary_time or "00:00") then return end
 
         ran[today] = true
-        runScheduledSummaries()
+        running = true
+        runScheduledSummaries(function() running = false end)
     end
 
     autoSummaryTimer = hs.timer.doEvery(60, check)
@@ -1038,6 +1053,9 @@ function M.startAutoSummary()
     -- catch-up does not wait for the next tick.
     wakeWatcher = hs.caffeinate.watcher.new(function(event)
         if event == hs.caffeinate.watcher.systemDidWake then
+            -- Retry on every wake: a run that failed (for example because the
+            -- Mac slept mid-run) left no file, so it is picked up again here.
+            ran = {}
             hs.timer.doAfter(15, check)
         end
     end):start()
